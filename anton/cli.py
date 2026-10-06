@@ -64,7 +64,9 @@ def cmd_run(a: argparse.Namespace) -> int:
     job.log(f"job {job.id} repo={repo.slug} (direct run: no queue, no limits)")
     out = runner.run_job(job, settings, dry_run=a.dry_run)
     print(f"{out.status}: {out.pr or out.reason or ''}")
-    return 0 if out.status in ("pr-open", "no-changes") else 1
+    if out.status == "proposed":
+        print(out.answer)
+    return 0 if out.status in ("pr-open", "no-changes", "proposed") else 1
 
 
 def cmd_enqueue(a: argparse.Namespace) -> int:
@@ -185,6 +187,16 @@ def cmd_poll(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_patch(a: argparse.Namespace) -> int:
+    """Print the patch of a proposed change: `anton patch <job-id> > anton.patch`, then `git apply anton.patch`."""
+    row = open_queue(config.load_settings()).get(a.id)
+    if row is None or row.status != "proposed" or not row.answer:
+        print("no proposed patch for that job", file=sys.stderr)
+        return 1
+    print(row.answer)
+    return 0
+
+
 def cmd_jobs(_: argparse.Namespace) -> int:
     for p in sorted(runner.JOBS_DIR.glob("*/job.json")):
         d = json.loads(p.read_text())
@@ -230,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     po = sub.add_parser("poll", help="check GitHub for labelled issues once")
     po.add_argument("--once", action="store_true", required=True)
     po.set_defaults(fn=cmd_poll)
+    pa = sub.add_parser("patch", help="print the patch of a proposed change")
+    pa.add_argument("id")
+    pa.set_defaults(fn=cmd_patch)
     j = sub.add_parser("jobs", help="list job directories")
     j.set_defaults(fn=cmd_jobs)
     st = sub.add_parser("selftest", help="try to escape the sandbox (must pass before untrusted input)")

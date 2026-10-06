@@ -11,7 +11,7 @@ Task → queue → fresh clone → Claude Code implements it in a sandbox → ch
 - **Sandbox:** `npm`, your checks and Claude run in [bubblewrap](https://github.com/containers/bubblewrap): system read-only, checkout at `/work` (`.git` read-only), no access to keys or tokens.
 - **Claude** runs headless (`claude -p`, the task goes in on stdin) with a tool allow/deny list and turn and time limits. It cannot run git, gh, curl or deploy commands. Installing dependencies (`npm install`) and web research (`WebSearch`, `WebFetch`) are opt-in per repo through `allow_tools`; install scripts never run, whoever types `npm install`.
 - **The runner, not Claude,** commits and pushes an `anton/*` branch, using a short-lived GitHub App token scoped to that one repo.
-- **Gates:** `gate` checks must pass, `regression` checks must not get worse. Changes to protected paths fail the job.
+- **Gates:** `gate` checks must pass, `regression` checks must not get worse. A change to protected paths (CI workflows, `.env`, keys, ...) is never pushed: it comes back as a **patch** instead (see below). Symlinks and nested repositories fail the job.
 - **Queue:** SQLite, limited parallelism, daily limits, no duplicate jobs per issue or PR.
 - **English artifacts:** Claude starts its answer with `TITLE: <imperative English title>` and writes code, comments and the summary in English, whatever language the task is in. The runner derives the commit message, the PR title and the (ASCII) branch name from that title.
 
@@ -30,12 +30,22 @@ anton queue --active              # 3. watch it
 ```
 
 A job goes `queued` → `running` (clone, install, baseline checks, Claude, checks again) and ends as
-`pr-open` (a draft PR is waiting for you), `no-changes`, `failed` (the reason is shown) or `cancelled`.
+`pr-open` (a draft PR is waiting for you), `proposed` (a patch is waiting for you), `no-changes`, `failed` (the reason is shown) or `cancelled`.
 At most a few jobs run in parallel and a daily limit applies (see `[daemon]` in the config).
 
 Good tasks are concrete and small, and say what to leave alone. Vague ones ("improve the site") give vague PRs. File names are not needed: Claude explores the repo itself.
 
 `anton enqueue --pr 7 --task "..."` adds a commit to the branch of an open PR instead (same repository only, never the default or a protected branch, plain push, no force). `anton ask --repo o/r --question "..."` answers a question without creating anything.
+
+### Protected files: patches
+
+Anton has no permission to change `.github/*`, `.env*`, keys and similar, and never will. If a task needs it (for example a GitHub Actions workflow), the job ends as `proposed`: nothing is pushed, no PR is opened. Instead you get the whole change as a patch: as a file in Telegram, as a comment on the issue (label `anton:patch`), or with `anton patch <job-id> > anton.patch`. Review it, then apply and push it yourself on a checkout of the base branch (or the PR branch):
+
+```
+git apply anton.patch && git add -A && git commit -m "..." && git push
+```
+
+The text at the top of the patch (title, touched paths, summary) is ignored by `git apply`. Patches over 200,000 characters fail the job.
 
 `~/jobs/<id>/` is **not** an inbox. It only holds the log and result of one finished job (`log.txt`, `job.json`, `claude.json`); the checkout is deleted afterwards.
 
@@ -71,6 +81,7 @@ anton queue [--active]                  # queue and 24h budget
 anton poll --once                       # check GitHub for labelled issues now
 anton serve                             # run the worker pool
 anton cancel <job-id>
+anton patch <job-id> > anton.patch       # the patch of a `proposed` job
 anton run --repo o/r --task "..." [--dry-run]   # one job now, no queue
 ```
 

@@ -13,8 +13,8 @@ from .config import RepoConfig
 TOKEN_TTL = 45 * 60
 # issues: write (create, edit, comment, labels); pull requests and contents: read-only (inspect a PR and its branch)
 PERMISSIONS = {"issues": "write", "pull_requests": "read", "contents": "read"}
-STATES = ("queued", "running", "pr", "failed")
-COLORS = {"": "5319e7", "queued": "fbca04", "running": "0e8a16", "pr": "1d76db", "failed": "d93f0b"}
+STATES = ("queued", "running", "pr", "patch", "failed")
+COLORS = {"": "5319e7", "queued": "fbca04", "running": "0e8a16", "pr": "1d76db", "patch": "c5def5", "failed": "d93f0b"}
 
 
 def state_labels(trigger: str) -> dict[str, str]:

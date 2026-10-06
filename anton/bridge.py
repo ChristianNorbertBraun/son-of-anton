@@ -50,7 +50,9 @@ TOOLS = [
      "description": "Make a code change in a repo (Son of Anton / Claude Code). Use it for ANY request to "
                     "implement, fix, change or add something in a repository, website or app: you cannot edit "
                     "that code yourself. Anton explores the repo itself, works in a sandbox and opens a DRAFT "
-                    "pull request, so pass the user's request in their own words; file names are NOT needed.",
+                    "pull request, so pass the user's request in their own words; file names are NOT needed. If the "
+                    "change touches protected files (CI workflows, .env, ...) nothing is pushed: the user "
+                    "receives a patch to apply himself.",
      "inputSchema": {"type": "object", "required": ["repo", "task"], "properties": {
          "repo": _REPO,
          "task": {"type": "string", "description": "The user's request VERBATIM: their wording, language, "

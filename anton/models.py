@@ -10,7 +10,7 @@ class Cancelled(Exception):
 
 @dataclass(frozen=True)
 class Outcome:
-    status: str  # pr-open | no-changes | answered | failed | cancelled
+    status: str  # pr-open | no-changes | answered | proposed | failed | cancelled
     pr: str | None = None
     reason: str | None = None
-    answer: str | None = None  # the reply of a question job
+    answer: str | None = None  # the reply of a question job, or the patch of a proposed change

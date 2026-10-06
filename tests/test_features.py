@@ -205,7 +205,7 @@ class UpdatePrLifecycleTests(unittest.TestCase):
                        {"build": res("build", "gate", 0, 0), "check": res("check", "regression", 1, 4)}]
         self.claude = {"is_error": False, "subtype": "success", "num_turns": 3,
                        "result": "TITLE: Add dark footer variant\n\nAdded the variant."}
-        self.changed, self.problems, self.comment_fails = ["src/footer.svelte"], [], False
+        self.changed, self.problems, self.protected, self.comment_fails = ["src/footer.svelte"], [], [], False
         self.claude_called = False
         P = mock.patch
         for p in (
@@ -215,7 +215,8 @@ class UpdatePrLifecycleTests(unittest.TestCase):
             P.object(runner.ghapp, "api", side_effect=self.fake_api),
             P.object(runner.gitops, "git", side_effect=self.fake_git),
             P.object(runner.gitops, "changed_files", side_effect=lambda cwd: list(self.changed)),
-            P.object(runner.gitops, "staged_problems", side_effect=lambda cwd, prot: list(self.problems)),
+            P.object(runner.gitops, "split_staged", side_effect=lambda cwd, prot: (list(self.problems), list(self.protected))),
+            P.object(runner.gitops, "staged_patch", side_effect=lambda cwd: "diff --git a/.github/x.yml b/.github/x.yml\n+new\n"),
             P.object(runner, "install_deps"), P.object(runner, "github_for", side_effect=lambda s, r: self.gh),
             P.object(runner, "run_checks", side_effect=lambda job, label, sc: self.checks.pop(0)),
             P.object(runner, "run_claude", side_effect=self.fake_claude),
@@ -320,6 +321,26 @@ class UpdatePrLifecycleTests(unittest.TestCase):
         self.checks = [{"check": res("check", "regression", 1, 4)}, {"check": res("check", "regression", 1, 9)}]
         self.assertEqual(self.go()[1].status, "failed")
         self.assertEqual(self.pushes(), [])
+
+    def test_protected_paths_become_a_patch_and_nothing_is_pushed(self):
+        self.protected = [".github/workflows/x.yml"]
+        job, out = self.go()
+        self.assertEqual(out.status, "proposed")
+        self.assertTrue(out.answer.startswith("# Proposed by Anton: Add dark footer variant\n"))
+        self.assertIn("Apply on a checkout of feature/footer", out.answer)
+        self.assertIn("diff --git a/.github/x.yml", out.answer)
+        self.assertIn("nothing was pushed", out.reason)
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.api_calls, [])  # no comment, no PR
+        self.assertEqual(self.tokens, [{"contents": "read"}])  # a write token is never even minted
+        self.assertFalse(job.work.exists())
+
+    def test_a_patch_that_is_too_large_fails_instead_of_being_cut(self):
+        self.protected = [".github/workflows/x.yml"]
+        runner.gitops.staged_patch.side_effect = lambda cwd: "x" * (runner.PATCH_LIMIT + 1)
+        _, out = self.go()
+        self.assertEqual((out.status, out.answer), ("failed", None))
+        self.assertIn("too large", out.reason)
 
     def test_cancel_before_the_push(self):
         _, out = self.go(cancel=lambda: self.claude_called)

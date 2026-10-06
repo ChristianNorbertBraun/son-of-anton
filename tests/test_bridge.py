@@ -217,6 +217,20 @@ class TelegramTests(unittest.TestCase):
         self.assertTrue(huge.endswith("\u2026"))
         self.assertNotIn("\x1b", format_event("started", self.row(task="a\x1b[31mb")))
 
+    def test_a_proposed_patch_is_sent_as_message_and_file(self):
+        row = self.row(id="2026-1-abc", status="proposed", pr=None, reason="Add preview (protected paths: .github/x.yml)",
+                       answer="# Proposed\ndiff --git a b\n")
+        text = format_event("finished", row)
+        self.assertIn("nothing was pushed", text)
+        self.assertIn("git apply anton-2026-1-abc.patch", text)
+        sent, files = [], []
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "telegram-token").write_text("123:abc\n")
+            (Path(d) / "telegram-chat").write_text("42\n")
+            TelegramNotifier(Path(d), send=lambda *a: sent.append(a), send_file=lambda *a: files.append(a))("finished", row)
+        self.assertEqual(files, [("123:abc", "42", "anton-2026-1-abc.patch", row.answer)])
+        self.assertEqual(len(sent), 1)
+
     def test_silent_until_a_bot_is_configured_then_sends(self):
         sent = []
         with tempfile.TemporaryDirectory() as d:

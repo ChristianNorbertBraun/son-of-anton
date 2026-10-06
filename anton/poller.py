@@ -5,6 +5,7 @@ Anything else is ignored silently: no comment, no label change (no spam, no sign
 Issue comments are never read; only title and body become the task."""
 from __future__ import annotations
 
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -82,11 +83,29 @@ def poll_once(repo: RepoConfig, gh, service: Service, seen: set | None = None,
         # also when the job already existed: this repairs a label update that failed last time
         gh.add_labels(number, [labels["queued"]])
         gh.remove_label(number, repo.trigger_label)
-        for stale in ("pr", "failed"):
+        for stale in ("pr", "patch", "failed"):
             gh.remove_label(number, labels[stale])
         if created:
             res.queued.append(number)
     return res
+
+
+COMMENT_PATCH_LIMIT = 50_000  # a GitHub comment holds 65,536 characters
+
+
+def patch_comment(row: JobRow) -> str:
+    """The comment for a proposed change: the patch inside a code fence that no line of it can close."""
+    reason = safe(row.reason or "", 400).replace("`", "'")
+    patch = row.answer or ""
+    if len(patch) > COMMENT_PATCH_LIMIT:
+        return (f"Anton prepared a change that touches protected paths, so nothing was pushed: {reason}\n\n"
+                f"The patch is too large for a comment. Get it with `anton patch {row.id}` on the machine "
+                "that runs Anton, or from the Telegram message.")
+    ticks = max((len(m) for m in re.findall(r"`+", patch)), default=0)
+    fence = "`" * max(3, ticks + 1)
+    return (f"Anton prepared a change that touches protected paths, so nothing was pushed: {reason}\n\n"
+            f"Save the block as `anton.patch` and run `git apply anton.patch` on a checkout of the base branch.\n\n"
+            f"{fence}diff\n{patch}\n{fence}")
 
 
 class IssueReporter:
@@ -111,6 +130,9 @@ class IssueReporter:
             if row.status == "pr-open" and row.pr:
                 gh.add_labels(row.issue, [labels["pr"]])
                 gh.comment(row.issue, f"Draft PR is ready for review: {row.pr}")
+            elif row.status == "proposed":
+                gh.add_labels(row.issue, [labels["patch"]])
+                gh.comment(row.issue, patch_comment(row))
             else:
                 gh.add_labels(row.issue, [labels["failed"]])
                 reason = safe(row.reason or row.status, 300).replace("`", "'")

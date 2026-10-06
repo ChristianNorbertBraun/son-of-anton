@@ -14,7 +14,7 @@ from typing import Callable, Iterator
 from .config import SLUG_RE
 
 ACTIVE = ("queued", "running")
-FINAL = ("pr-open", "no-changes", "answered", "failed", "cancelled")
+FINAL = ("pr-open", "no-changes", "answered", "proposed", "failed", "cancelled")
 DAY = 86400
 MAX_TASK_CHARS = 20_000
 REQUESTER_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")

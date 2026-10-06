@@ -227,7 +227,7 @@ class GitHubClientTests(unittest.TestCase):
 
         self.gh._api = api
         self.gh.ensure_labels("anton")
-        self.assertEqual(self.calls, ["anton", "anton:queued", "anton:running", "anton:pr", "anton:failed"])
+        self.assertEqual(self.calls, ["anton", "anton:queued", "anton:running", "anton:pr", "anton:patch", "anton:failed"])
 
 
 class ReporterTests(unittest.TestCase):
@@ -258,6 +258,21 @@ class ReporterTests(unittest.TestCase):
         self.assertNotIn("```\noops ```", comment)
         self.assertEqual(comment.count("```"), 2)  # only our own fence
         self.assertNotIn("\nsecond", comment)  # control characters flattened
+
+    def test_a_proposed_patch_is_commented_in_a_fence_the_patch_cannot_close(self):
+        patch = "diff --git a/x b/x\n+```yaml\n+````\n"
+        self.reporter("finished", self.row(status="proposed", reason="Add preview", answer=patch))
+        self.assertIn(("add", 12, ("anton:patch",)), self.gh.calls)
+        self.assertNotIn(("add", 12, ("anton:failed",)), self.gh.calls)
+        comment = self.gh.of("comment")[0][2]
+        self.assertIn("`````diff\n" + patch, comment)  # five backticks: longer than any run in the patch
+        self.assertTrue(comment.rstrip().endswith("`````"))
+
+    def test_a_huge_patch_is_not_pasted_into_a_comment(self):
+        self.reporter("finished", self.row(status="proposed", reason="r", answer="x" * 60_000))
+        comment = self.gh.of("comment")[0][2]
+        self.assertLess(len(comment), 2000)
+        self.assertIn("anton patch j1", comment)
 
     def test_cancelled_counts_as_failed_label(self):
         self.reporter("finished", self.row(status="cancelled"))
@@ -323,7 +338,7 @@ class PollLoopTests(unittest.TestCase):
 
     def test_state_label_names(self):
         self.assertEqual(state_labels("anton"), {"queued": "anton:queued", "running": "anton:running",
-                                                 "pr": "anton:pr", "failed": "anton:failed"})
+                                                 "pr": "anton:pr", "patch": "anton:patch", "failed": "anton:failed"})
 
 
 if __name__ == "__main__":

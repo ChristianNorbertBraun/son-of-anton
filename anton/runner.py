@@ -27,6 +27,7 @@ KEY_PATH = CONF_DIR / "app-key.pem"
 CLAUDE = HOME / ".local/bin/claude"
 CLAUDE_OUT_LIMIT = 4_000_000
 SUMMARY_LIMIT = 20_000
+PATCH_LIMIT = 200_000
 # never load project-level settings (hooks), project MCP servers or repo-provided skills
 CLAUDE_FLAGS = ["--setting-sources", "user", "--strict-mcp-config", "--disable-slash-commands"]
 
@@ -324,12 +325,13 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
         job.state("no-changes")
         return Outcome("no-changes")
     gitops.git(["add", "-A"], job.work)
-    problems = gitops.staged_problems(job.work, repo.protected_paths)
+    problems, protected = gitops.split_staged(job.work, repo.protected_paths)
     if problems:
         job.state("failed", reason="blocked changes", paths=problems)
         return Outcome("failed", reason=safe("blocked changes: " + ", ".join(problems[:5])))
     title, summary = split_title(result.get("result", ""), job)
-    if pr_info is None:
+    patch = gitops.staged_patch(job.work) if protected else None  # protected paths are never pushed
+    if pr_info is None and patch is None:
         final_branch = gitops.branch_name(job.issue, job.id, title)  # English title -> English branch
         gitops.assert_pushable(final_branch, repo.base)
         if final_branch != branch:
@@ -343,6 +345,8 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
         return Outcome("failed", reason=safe("checks failed or got worse: " + "; ".join(lines)))
 
     checkpoint()  # last chance to cancel before anything leaves this machine
+    if patch is not None:
+        return propose(job, title, summary, protected, patch, branch if pr_info else repo.base)
     write_token = token({"contents": "write", "pull_requests": "write"})
     job.log(f"push {branch}")
     gitops.git(["push", "-q", "origin", f"HEAD:refs/heads/{branch}"], job.work,
@@ -365,6 +369,23 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
         return Outcome("failed", reason=reason)
     job.state("pr-open", pr=pr["html_url"], branch=branch)
     return Outcome("pr-open", pr=pr["html_url"])
+
+
+def propose(job: Job, title: str, summary: str, protected: list[str], patch: str, target: str) -> Outcome:
+    """The change touches protected paths (CI workflows, secrets, ...): nothing is pushed, the user gets a
+    patch to review and apply. Text before the first `diff` line is ignored by `git apply`."""
+    paths = ", ".join(protected[:5])
+    header = "".join(f"# {line}\n" for line in (
+        f"Proposed by Anton: {title}", f"Touches protected paths: {paths}",
+        f"Apply on a checkout of {target}: git apply <this file>", "", *scrub(summary).splitlines()[:40]))
+    text = header + "\n" + scrub(patch)
+    if len(text) > PATCH_LIMIT:
+        reason = safe(f"the patch is too large to hand over ({len(text)} characters)")
+        job.state("failed", reason=reason)
+        return Outcome("failed", reason=reason)
+    job.state("proposed", paths=protected)
+    return Outcome("proposed", reason=safe(f"{title} (protected paths: {paths}; nothing was pushed)", 400),
+                   answer=text)
 
 
 def run_job(job: Job, settings: Settings, dry_run: bool = False,

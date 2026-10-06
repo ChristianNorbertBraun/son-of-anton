@@ -145,6 +145,31 @@ class GitCheckTests(unittest.TestCase):
         self.assertIn(".github/actions/a.yml (protected)", joined)
         self.assertNotIn("ok.txt", joined)
 
+    def test_split_staged_and_a_proposed_patch_applies_with_git_apply(self):
+        env = gitops.identity_env("t[bot]", 1)
+        with tempfile.TemporaryDirectory() as d:
+            repo, clone = Path(d) / "r", Path(d) / "c"
+            gitops.git(["init", "-q", str(repo)])
+            (repo / ".github/workflows").mkdir(parents=True)
+            (repo / ".github/workflows/a.yml").write_text("on: push\n")
+            (repo / "src.txt").write_text("one\n")
+            gitops.git(["add", "-A"], repo)
+            gitops.git(["commit", "-q", "-m", "base"], repo, env)
+            gitops.git(["clone", "-q", str(repo), str(clone)])
+            (repo / ".github/workflows/a.yml").write_text("on: [push, pull_request]\n")
+            (repo / "src.txt").write_text("two\n")
+            gitops.git(["add", "-A"], repo)
+            hard, protected = gitops.split_staged(repo, ())
+            self.assertEqual((hard, protected), ([], [".github/workflows/a.yml"]))
+            job = mock.Mock(state=mock.Mock())
+            out = runner.propose(job, "Run on pull requests", "Added a trigger.\ndiff --git fake", protected,
+                                 gitops.staged_patch(repo), "main")
+            self.assertEqual(out.status, "proposed")
+            (clone / "anton.patch").write_text(out.answer)
+            gitops.git(["apply", "anton.patch"], clone)
+            self.assertEqual((clone / "src.txt").read_text(), "two\n")
+            self.assertEqual((clone / ".github/workflows/a.yml").read_text(), "on: [push, pull_request]\n")
+
     def test_git_ignores_system_and_global_config(self):
         with mock.patch("anton.gitops.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, "", "")
@@ -458,7 +483,7 @@ class LifecycleTests(unittest.TestCase):
         self.checks = [{"build": result("build", "gate", 0, 0), "check": result("check", "regression", 1, 6)},
                        {"build": result("build", "gate", 0, 0), "check": result("check", "regression", 1, 5)}]
         self.claude = {"is_error": False, "subtype": "success", "num_turns": 4, "result": "Fixed it."}
-        self.changed, self.problems, self.api_fail = ["src/a.js"], [], None
+        self.changed, self.problems, self.protected, self.api_fail = ["src/a.js"], [], [], None
         self.cancel_after = None
         self.claude_called = False
         self.install_error = None
@@ -470,7 +495,8 @@ class LifecycleTests(unittest.TestCase):
             P.object(runner.ghapp, "api", side_effect=self.fake_api),
             P.object(runner.gitops, "git", side_effect=self.fake_git),
             P.object(runner.gitops, "changed_files", side_effect=lambda cwd: list(self.changed)),
-            P.object(runner.gitops, "staged_problems", side_effect=lambda cwd, prot: list(self.problems)),
+            P.object(runner.gitops, "split_staged", side_effect=lambda cwd, prot: (list(self.problems), list(self.protected))),
+            P.object(runner.gitops, "staged_patch", side_effect=lambda cwd: "diff --git a/.github/x.yml b/.github/x.yml\n+new\n"),
             P.object(runner, "install_deps", side_effect=self.fake_install),
             P.object(runner, "run_checks", side_effect=lambda job, label, sc: self.checks.pop(0)),
             P.object(runner, "run_claude", side_effect=self.fake_claude),
@@ -562,6 +588,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("blocked changes", out.reason)
         self.assertEqual(self.pushes(), [])
         self.assertNotIn(["commit"], [c[:1] for c in self.calls if c[0] == "commit"])
+
+    def test_protected_paths_are_proposed_as_a_patch_not_pushed_and_no_pr_is_opened(self):
+        self.protected = [".github/workflows/deploy.yml"]
+        _, out = self.go()
+        self.assertEqual(out.status, "proposed")
+        self.assertIn("Apply on a checkout of main", out.answer)
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.api_calls, [])
+        self.assertFalse(any(c[:2] == ["branch", "-m"] for c in self.calls))
+
+    def test_hard_problems_still_fail_even_when_protected_paths_are_present(self):
+        self.problems, self.protected = ["link (symlink)"], [".github/x.yml"]
+        self.assertEqual(self.go()[1].status, "failed")
 
     def test_worse_checks_fail_the_job(self):
         self.checks[1]["check"] = result("check", "regression", 1, 9)

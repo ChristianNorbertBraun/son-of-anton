@@ -91,16 +91,22 @@ def _hit(path: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(p, q) or fnmatch.fnmatchcase(p, "*/" + q)
 
 
+def odd_path(raw: str) -> bool:
+    """Path shapes that never come from a normal checkout: absolute, '..', trailing slash, control characters."""
+    path = raw[2:] if raw.startswith("./") else raw
+    parts = path.split("/")
+    return (path.startswith("/") or path.endswith("/") or ".." in parts or "" in parts
+            or any(ord(c) < 32 or ord(c) == 127 for c in path))
+
+
+def is_protected(raw: str, protected: tuple[str, ...]) -> bool:
+    path = raw[2:] if raw.startswith("./") else raw
+    return any(_hit(path, pat) for pat in (*ALWAYS_PROTECTED, *protected))
+
+
 def violations(changed: list[str], protected: tuple[str, ...]) -> list[str]:
     """Paths Claude must not change. Odd path shapes are violations too."""
-    bad = []
-    for raw in changed:
-        path = raw[2:] if raw.startswith("./") else raw
-        parts = path.split("/")
-        odd = path.startswith("/") or path.endswith("/") or ".." in parts or "" in parts
-        if odd or any(_hit(path, pat) for pat in (*ALWAYS_PROTECTED, *protected)):
-            bad.append(raw)
-    return bad
+    return [raw for raw in changed if odd_path(raw) or is_protected(raw, protected)]
 
 
 def changed_files(cwd: Path) -> list[str]:
@@ -122,15 +128,30 @@ def parse_raw(out: str) -> list[tuple[str, str, str]]:
     return entries
 
 
-def staged_problems(cwd: Path, protected: tuple[str, ...]) -> list[str]:
-    """Inspect what is ACTUALLY staged: symlinks, gitlinks (nested repos) and protected paths."""
+def split_staged(cwd: Path, protected: tuple[str, ...]) -> tuple[list[str], list[str]]:
+    """Look at what is staged and split it: (hard problems, protected paths).
+    Hard problems (symlinks, nested repositories, odd paths) always fail the job. Protected paths (CI workflows,
+    .env, ...) are never pushed, but the change can be handed to the user as a patch."""
     out = git(["diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev"], cwd)
-    problems, paths = [], []
+    hard, protected_paths = [], []
     for mode, _status, path in parse_raw(out):
-        paths.append(path)
         if mode == "120000":
-            problems.append(f"{path} (symlink)")
+            hard.append(f"{path} (symlink)")
         elif mode == "160000":
-            problems.append(f"{path} (nested repository)")
-    problems += [f"{p} (protected)" for p in violations(paths, protected)]
-    return problems
+            hard.append(f"{path} (nested repository)")
+        elif odd_path(path):
+            hard.append(f"{path!r} (unexpected path)")
+        elif is_protected(path, protected):
+            protected_paths.append(path)
+    return hard, protected_paths
+
+
+def staged_patch(cwd: Path) -> str:
+    """Everything that is staged as one patch, to be applied by the user with `git apply`."""
+    return git(["diff", "--cached", "--no-ext-diff", "--no-color", "--binary"], cwd)
+
+
+def staged_problems(cwd: Path, protected: tuple[str, ...]) -> list[str]:
+    """Hard problems plus protected paths, as one list of readable lines."""
+    hard, protected_paths = split_staged(cwd, protected)
+    return hard + [f"{p} (protected)" for p in protected_paths]
