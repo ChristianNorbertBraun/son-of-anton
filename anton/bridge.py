@@ -321,7 +321,7 @@ class Bridge:
         job_id = args.get("job_id")
         if job_id is not None:
             row = q.get(self._str(args, "job_id"))
-            return _line(row) if row else "no such job"
+            return f"{_line(row)}\ntask: {scrub(row.task)[:2000]}" if row else "no such job"
         active, recent = q.list(active_only=True), q.list(limit=5)
         lines = [f"Budget: {q.used_today()}/{q.daily_limit} jobs in the last 24h"]
         lines += ["Active:"] + ([_line(r) for r in active] or ["  none"])

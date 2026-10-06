@@ -32,6 +32,7 @@ class Check:
     cmd: str
     kind: str  # "gate" must pass; "regression" must not get worse than baseline
     metric: str | None = None  # regex, group 1 = integer (errors, files, ...)
+    metric_lines: str | None = None  # regex: the number of matching lines is the metric (one line per problem)
 
 
 @dataclass(frozen=True)
@@ -135,13 +136,16 @@ def _checks(raw, where: str) -> tuple[Check, ...]:
             raise ConfigError(f"{w}: cmd must be a non-empty string")
         if kind not in ("gate", "regression"):
             raise ConfigError(f"{w}: kind must be gate or regression")
-        metric = c.get("metric")
-        if metric is not None:
-            try:
-                re.compile(metric)
-            except (re.error, TypeError) as e:
-                raise ConfigError(f"{w}: metric is not a valid regex") from e
-        out.append(Check(name, cmd, kind, metric))
+        patterns = []
+        for key in ("metric", "metric_lines"):
+            value = c.get(key)
+            if value is not None:
+                try:
+                    re.compile(value)
+                except (re.error, TypeError) as e:
+                    raise ConfigError(f"{w}: {key} is not a valid regex") from e
+            patterns.append(value)
+        out.append(Check(name, cmd, kind, *patterns))
     return tuple(out)
 
 

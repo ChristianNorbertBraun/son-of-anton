@@ -53,3 +53,4 @@ name = "lint"
 cmd = "npm run lint"
 kind = "regression"
 metric = 'Code style issues found in (\d+) files?'
+metric_lines = '^\[warn\] (?!Code style)'   # prettier says "the above file" for one file: count the [warn] lines

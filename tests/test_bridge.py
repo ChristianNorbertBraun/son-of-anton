@@ -199,12 +199,23 @@ class TelegramTests(unittest.TestCase):
         return mock.Mock(**{**base, **kw})
 
     def test_messages(self):
-        self.assertIn("Fix footer", format_event("started", self.row()))
-        self.assertNotIn("second", format_event("started", self.row()))
+        started = format_event("started", self.row())
+        self.assertIn("Fix footer", started)
+        self.assertIn("second", started)  # the WHOLE task text is shown, not only its first line
         self.assertEqual(format_event("finished", self.row()), "Draft PR ready: https://x/pr/1")
         self.assertIn("Failed", format_event("finished", self.row(status="failed", reason="boom\x1b[31m")))
         self.assertNotIn("\x1b", format_event("finished", self.row(status="failed", reason="boom\x1b[31m")))
         self.assertIsNone(format_event("queued", self.row()))
+
+    def test_a_long_multiline_task_is_shown_in_full_up_to_telegrams_limit(self):
+        task = "Ergänze am Ende einen kurzen Abschnitt Risiken mit drei Stichpunkten zu möglichen Problemen beim Dark Mode.\n" * 5
+        text = format_event("started", self.row(task=task))
+        self.assertIn("Dark Mode.\nErgänze", text)  # line breaks kept, nothing cut at 80 characters
+        self.assertGreaterEqual(text.count("Ergänze"), 5)
+        huge = format_event("started", self.row(task="x" * 10_000))
+        self.assertLessEqual(len(huge), 4096)
+        self.assertTrue(huge.endswith("\u2026"))
+        self.assertNotIn("\x1b", format_event("started", self.row(task="a\x1b[31mb")))
 
     def test_silent_until_a_bot_is_configured_then_sends(self):
         sent = []

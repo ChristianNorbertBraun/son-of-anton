@@ -24,6 +24,10 @@ class CheckResult:
 
 
 def parse_metric(check: Check, output: str, exit_code: int) -> int | None:
+    if check.metric_lines:  # one line per problem (e.g. prettier's "[warn] <file>")
+        count = len(re.findall(check.metric_lines, output, re.M))
+        if count:
+            return count
     if check.metric:
         m = re.search(check.metric, output)
         if m:
@@ -52,7 +56,12 @@ def compare(baseline: dict[str, CheckResult], after: dict[str, CheckResult]) -> 
             ok = ok and a.passed
             continue
         if a.metric is None or b is None or b.metric is None:
-            lines.append(f"- {name}: not comparable (exit {a.exit_code})")
+            if b is not None and b.passed and not a.passed:
+                # clean before, broken now: worse, even if the problems cannot be counted
+                lines.append(f"- {name}: passed -> FAILED (WORSE)")
+                ok = False
+            else:
+                lines.append(f"- {name}: not comparable (exit {a.exit_code})")
             continue
         worse = a.metric > b.metric
         arrow = f"{b.metric} -> {a.metric}"

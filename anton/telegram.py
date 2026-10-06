@@ -5,11 +5,20 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import re
 from pathlib import Path
 from typing import Callable
 
 from .queue import JobRow
-from .runner import CONF_DIR, safe
+from .runner import CONF_DIR, safe, scrub
+
+TASK_LIMIT = 3500  # Telegram allows 4096 characters per message
+
+
+def full_text(text, limit: int = TASK_LIMIT) -> str:
+    """The whole text (line breaks kept), without control characters or secrets, cut only above `limit`."""
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\x9b]", "?", scrub(text)).strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
 
 
 def format_event(event: str, row: JobRow) -> str | None:
@@ -18,7 +27,7 @@ def format_event(event: str, row: JobRow) -> str | None:
     pr_number = getattr(row, "pr_number", None)
     if event == "started":
         what = f"{row.repo} PR #{pr_number}" if pr_number else row.repo
-        return f"Started: {what}\n{safe(row.task.splitlines()[0] if row.task.strip() else 'task', 80)}"
+        return f"Started: {what}\n{full_text(row.task) or 'task'}"
     if event != "finished":
         return None
     if row.status == "pr-open":
@@ -27,7 +36,7 @@ def format_event(event: str, row: JobRow) -> str | None:
         return f"No changes were needed ({row.repo})."
     if row.status == "cancelled":
         return f"Cancelled ({row.repo})."
-    return f"Failed ({row.repo}): {safe(row.reason or row.status, 200)}"
+    return f"Failed ({row.repo}): {safe(row.reason or row.status, 800)}"
 
 
 def _send(token: str, chat_id: str, text: str) -> None:

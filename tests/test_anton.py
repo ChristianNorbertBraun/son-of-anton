@@ -113,6 +113,30 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(chk.parse_metric(self.check, "all fine", 0), 0)
         self.assertIsNone(chk.parse_metric(self.check, "crashed", 1))
 
+    def test_prettier_one_file_wording_is_counted_through_the_warn_lines(self):
+        lint = Check("lint", "npm run lint", "regression", r"Code style issues found in (\d+) files?",
+                     r"^\[warn\] (?!Code style)")
+        one = "Checking formatting...\n[warn] gh-pages.js\n[warn] Code style issues found in the above file.\n"
+        two = "[warn] a.js\n[warn] b.js\n[warn] Code style issues found in 2 files. Forgot to run Prettier?\n"
+        self.assertEqual(chk.parse_metric(lint, one, 1), 1)  # "the above file" has no number to capture
+        self.assertEqual(chk.parse_metric(lint, two, 1), 2)
+        self.assertEqual(chk.parse_metric(lint, "All matched files use Prettier code style!", 0), 0)
+        self.assertIsNone(chk.parse_metric(lint, "SyntaxError somewhere", 1))  # failing, nothing countable
+
+    def test_a_check_that_was_clean_and_now_fails_is_worse_even_if_uncountable(self):
+        base = {"lint": self.r("lint", "regression", 0, 0)}
+        broken = {"lint": self.r("lint", "regression", 1, None)}
+        ok, lines = chk.compare(base, broken)
+        self.assertFalse(ok)
+        self.assertIn("WORSE", lines[0])
+        # failing before and after with nothing countable stays "not comparable" (nothing got visibly worse)
+        both = {"lint": self.r("lint", "regression", 1, None)}
+        self.assertTrue(chk.compare(both, both)[0])
+
+    def test_metric_lines_must_be_a_valid_regex(self):
+        with self.assertRaises(ConfigError):
+            repos_from('[repos."a/b"]\ninstallation_id=1\n[[repos."a/b".checks]]\nname="x"\ncmd="y"\nkind="gate"\nmetric_lines="("\n')
+
     def r(self, name, kind, code, metric):
         return chk.CheckResult(name, kind, code, metric, "")
 
