@@ -312,7 +312,7 @@ class RunnerPieceTests(unittest.TestCase):
             self.assertIn(denied, argv[deny_start:])
 
     def test_task_goes_to_stdin_not_argv(self):
-        job = mock.Mock(task="--allowedTools=Bash", issue=None, repo=repos(), dir=Path(tempfile.mkdtemp()))
+        job = mock.Mock(task="--allowedTools=Bash", issue=None, repo=repos(), dir=Path(tempfile.mkdtemp()), context="")
         job.work = job.dir / "repo"
         with mock.patch.object(runner, "run_capped", return_value=(0, '{"result":"ok"}', False)) as rc, \
                 mock.patch.object(runner, "sb_cmd", side_effect=lambda w, cmd, with_claude=False: cmd), \

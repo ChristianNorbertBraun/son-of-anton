@@ -28,6 +28,22 @@ def open_queue(settings: config.Settings) -> Queue:
     return Queue(DB_PATH, daily_limit=settings.daemon.daily_limit, max_queued=settings.daemon.max_queued)
 
 
+# chat clients: name -> token file. Each gets its own quota, so one cannot use up the other's budget.
+CLIENTS = {"merlin": "bridge-token", "anton": "bridge-token-anton"}
+
+
+def bridge_tokens() -> dict[str, str]:
+    tokens = {}
+    for name, filename in CLIENTS.items():
+        try:
+            token = (runner.CONF_DIR / filename).read_text().strip()
+        except OSError:
+            continue
+        if len(token) >= 32:
+            tokens[name] = token
+    return tokens
+
+
 def github_factory(settings: config.Settings):
     """One GitHub client per repo, so the installation token is reused instead of minted per call."""
     clients: dict[str, GitHub] = {}
@@ -55,12 +71,38 @@ def cmd_enqueue(a: argparse.Namespace) -> int:
     settings = config.load_settings()
     svc = Service(open_queue(settings), settings.repos)
     try:
-        row, created = svc.submit(a.repo, a.task, a.issue, requested_by="cli")
+        row, created = svc.submit(a.repo, a.task, a.issue, requested_by="cli", pr_number=a.pr)
     except (LimitError, InputError) as e:
         print(f"rejected: {e}", file=sys.stderr)
         return 1
     print(f"{'queued' if created else 'already active'}: {row.id} ({row.status})")
     return 0
+
+
+def cmd_ask(a: argparse.Namespace) -> int:
+    """Ask a read-only question about a repo and print the answer (needs `anton serve` to be running)."""
+    import time
+    from .queue import FINAL
+    settings = config.load_settings()
+    q = open_queue(settings)
+    try:
+        row = Service(q, settings.repos).submit_ask(a.repo, a.question, requested_by="cli")
+    except (LimitError, InputError) as e:
+        print(f"rejected: {e}", file=sys.stderr)
+        return 1
+    print(f"asked: {row.id}", file=sys.stderr)
+    deadline = time.monotonic() + a.wait
+    while time.monotonic() < deadline:
+        cur = q.get(row.id)
+        if cur.status in FINAL:
+            if cur.status == "answered":
+                print(cur.answer)
+                return 0
+            print(f"no answer: {cur.status} {safe(cur.reason or '')}", file=sys.stderr)
+            return 1
+        time.sleep(2)
+    print(f"still running, fetch later: anton queue (job {row.id})", file=sys.stderr)
+    return 1
 
 
 def cmd_queue(a: argparse.Namespace) -> int:
@@ -92,7 +134,9 @@ def cmd_serve(a: argparse.Namespace) -> int:
     print(f"anton serve: max_parallel={settings.daemon.max_parallel} daily_limit={settings.daemon.daily_limit} "
           f"dry_run={dry} recovered_failed={failed} gc_removed={removed}", flush=True)
     gh_for = github_factory(settings)
-    svc = Service(q, settings.repos, requester_limits={bridge.REQUESTER: settings.daemon.bridge_daily_limit})
+    clients = bridge_tokens()
+    svc = Service(q, settings.repos, requester_limits={name: settings.daemon.bridge_daily_limit for name in CLIENTS},
+                  write_limit=settings.daemon.bridge_write_limit, ask_limit=settings.daemon.bridge_ask_limit)
 
     def log_event(ev, row):
         print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True)
@@ -109,13 +153,10 @@ def cmd_serve(a: argparse.Namespace) -> int:
         threading.Thread(target=poller.poll_forever, args=(settings, svc, gh_for, stop), name="poller",
                          daemon=True).start()
     server = None
-    try:
-        token = (runner.CONF_DIR / "bridge-token").read_text().strip()
-    except OSError:
-        token = ""
-    if len(token) >= 32:  # the chat bridge is opt-in: no token file, no endpoint
-        server = bridge.serve(bridge.Bridge(settings, svc, gh_for), token, settings.daemon.bridge_port)
-        print(f"anton serve: chat bridge on 127.0.0.1:{settings.daemon.bridge_port}", flush=True)
+    if clients:  # the chat bridge is opt-in: no token file, no endpoint
+        server = bridge.serve(bridge.Bridge(settings, svc, gh_for), clients, settings.daemon.bridge_port)
+        print(f"anton serve: chat bridge on 127.0.0.1:{settings.daemon.bridge_port} for {', '.join(clients)}",
+              flush=True)
     pool.run_forever(stop)
     if server:
         server.shutdown()
@@ -137,7 +178,7 @@ def cmd_poll(a: argparse.Namespace) -> int:
             continue
         gh = gh_for(repo)
         gh.ensure_labels(repo.trigger_label)
-        res = poller.poll_once(repo, gh, svc)
+        res = poller.poll_once(repo, gh, svc, trusted_extra=(settings.github.bot_name,))
         print(f"{repo.slug}: queued={res.queued} limited={res.limited}")
         for n, why in res.ignored:
             print(f"  ignored #{n}: {why}")
@@ -170,7 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--repo", required=True)
     e.add_argument("--task", required=True)
     e.add_argument("--issue", type=int)
+    e.add_argument("--pr", type=int, help="extend this existing pull request (add a commit to its branch)")
     e.set_defaults(fn=cmd_enqueue)
+    k = sub.add_parser("ask", help="ask a read-only question about a repo")
+    k.add_argument("--repo", required=True)
+    k.add_argument("--question", required=True)
+    k.add_argument("--wait", type=int, default=180, help="seconds to wait for the answer")
+    k.set_defaults(fn=cmd_ask)
     q = sub.add_parser("queue", help="show the queue")
     q.add_argument("--active", action="store_true")
     q.add_argument("--limit", type=int, default=20)

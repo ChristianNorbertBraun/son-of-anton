@@ -11,6 +11,8 @@ from . import ghapp
 from .config import RepoConfig
 
 TOKEN_TTL = 45 * 60
+# issues: write (create, edit, comment, labels); pull requests and contents: read-only (inspect a PR and its branch)
+PERMISSIONS = {"issues": "write", "pull_requests": "read", "contents": "read"}
 STATES = ("queued", "running", "pr", "failed")
 COLORS = {"": "5319e7", "queued": "fbca04", "running": "0e8a16", "pr": "1d76db", "failed": "d93f0b"}
 
@@ -31,7 +33,7 @@ class GitHub:
     def _call(self, method: str, path: str, body: dict | None = None):
         if self._token is None or self._clock() - self._minted > TOKEN_TTL:
             self._token = self._mint(self.app_id, self.key_path, self.repo.installation_id, self.repo.slug,
-                                     {"issues": "write"})
+                                     dict(PERMISSIONS))
             self._minted = self._clock()
         return self._api(method, f"/repos/{self.repo.slug}{path}", self._token, body)
 
@@ -40,6 +42,22 @@ class GitHub:
 
     def issue(self, number: int) -> dict:
         return self._call("GET", f"/issues/{int(number)}")
+
+    def create_issue(self, title: str, body: str) -> dict:
+        return self._call("POST", "/issues", {"title": title, "body": body})
+
+    def update_issue(self, number: int, fields: dict) -> dict:
+        allowed = {k: v for k, v in fields.items() if k in ("title", "body", "state", "state_reason")}
+        return self._call("PATCH", f"/issues/{int(number)}", allowed)
+
+    def pull(self, number: int) -> dict:
+        return self._call("GET", f"/pulls/{int(number)}")
+
+    def pull_files(self, number: int) -> list[dict]:
+        return self._call("GET", f"/pulls/{int(number)}/files?per_page=100")
+
+    def branch(self, name: str) -> dict:
+        return self._call("GET", f"/branches/{quote(name, safe='/')}")
 
     def events(self, number: int) -> list[dict]:
         out: list[dict] = []

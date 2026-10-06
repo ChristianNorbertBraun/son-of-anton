@@ -14,7 +14,7 @@ from typing import Callable, Iterator
 from .config import SLUG_RE
 
 ACTIVE = ("queued", "running")
-FINAL = ("pr-open", "no-changes", "failed", "cancelled")
+FINAL = ("pr-open", "no-changes", "answered", "failed", "cancelled")
 DAY = 86400
 MAX_TASK_CHARS = 20_000
 REQUESTER_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")
@@ -24,9 +24,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY, repo TEXT NOT NULL, issue INTEGER, task TEXT NOT NULL,
   status TEXT NOT NULL, requested_by TEXT NOT NULL DEFAULT 'cli',
   created INTEGER NOT NULL, started INTEGER, finished INTEGER,
-  pr TEXT, reason TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0
+  pr TEXT, reason TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+  pr_number INTEGER,
+  kind TEXT NOT NULL DEFAULT 'change',  -- 'change' = a code change, 'ask' = a read-only question about a repo
+  answer TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, created);
+CREATE TABLE IF NOT EXISTS actions (  -- GitHub write actions of chat agents (issues, comments), for a daily limit
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, requester TEXT NOT NULL, kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS actions_requester ON actions (requester, ts);
 """
 
 
@@ -52,6 +59,9 @@ class JobRow:
     pr: str | None
     reason: str | None
     cancel_requested: bool
+    pr_number: int | None = None  # set for "extend this existing pull request" jobs
+    kind: str = "change"
+    answer: str | None = None
 
 
 def _row(r: sqlite3.Row) -> JobRow:
@@ -60,7 +70,7 @@ def _row(r: sqlite3.Row) -> JobRow:
     return JobRow(**d)
 
 
-def validate(repo: str, task: str, issue: int | None, requested_by: str) -> None:
+def validate(repo: str, task: str, issue: int | None, requested_by: str, pr_number: int | None = None) -> None:
     if not isinstance(repo, str) or not SLUG_RE.fullmatch(repo):
         raise InputError("invalid repo")
     if not isinstance(task, str) or not task.strip():
@@ -69,6 +79,11 @@ def validate(repo: str, task: str, issue: int | None, requested_by: str) -> None
         raise InputError(f"task too long (max {MAX_TASK_CHARS} characters) or contains NUL")
     if issue is not None and (isinstance(issue, bool) or not isinstance(issue, int) or not 0 < issue < 2**31):
         raise InputError("issue must be an integer between 1 and 2^31-1")
+    if pr_number is not None and (isinstance(pr_number, bool) or not isinstance(pr_number, int)
+                                  or not 0 < pr_number < 2**31):
+        raise InputError("pr must be an integer between 1 and 2^31-1")
+    if issue is not None and pr_number is not None:
+        raise InputError("a job is either for an issue or for a pull request, not both")
     if not isinstance(requested_by, str) or not REQUESTER_RE.fullmatch(requested_by):
         raise InputError("invalid requested_by")
 
@@ -82,6 +97,10 @@ class Queue:
         os.chmod(self.path.parent, 0o700)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            columns = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
+            for column, ddl in (("pr_number", "INTEGER"), ("kind", "TEXT NOT NULL DEFAULT 'change'"), ("answer", "TEXT")):
+                if column not in columns:  # databases created before this feature existed
+                    c.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
         os.chmod(self.path, 0o600)  # task texts are private
 
     @contextlib.contextmanager
@@ -100,20 +119,26 @@ class Queue:
 
     def _used(self, c: sqlite3.Connection) -> int:
         # a job that actually started cost Claude tokens, even if it was cancelled afterwards
-        return c.execute("SELECT COUNT(*) FROM jobs WHERE created>=? AND (status!='cancelled' OR started IS NOT NULL)",
-                         (self._now() - DAY,)).fetchone()[0]
+        return c.execute("SELECT COUNT(*) FROM jobs WHERE kind='change' AND created>=? "
+                         "AND (status!='cancelled' OR started IS NOT NULL)", (self._now() - DAY,)).fetchone()[0]
 
     def enqueue(self, repo: str, task: str, issue: int | None = None,
-                requested_by: str = "cli") -> tuple[JobRow, bool]:
-        """Return (job, created). An active job for the same repo+issue is returned, not duplicated."""
-        validate(repo, task, issue, requested_by)
+                requested_by: str = "cli", pr_number: int | None = None,
+                kind: str = "change") -> tuple[JobRow, bool]:
+        """Return (job, created). An active job for the same repo+issue (or +pull request) is returned,
+        not duplicated: two jobs must never push to the same branch at once."""
+        validate(repo, task, issue, requested_by, pr_number)
+        if kind not in ("change", "ask"):
+            raise InputError("invalid job kind")
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             try:
-                if issue is not None:
+                for column, value in (("issue", issue), ("pr_number", pr_number)):
+                    if value is None:
+                        continue
                     dup = c.execute(
-                        "SELECT * FROM jobs WHERE repo=? AND issue=? AND status IN ('queued','running')",
-                        (repo, issue)).fetchone()
+                        f"SELECT * FROM jobs WHERE repo=? AND {column}=? AND status IN ('queued','running')",
+                        (repo, value)).fetchone()
                     if dup:
                         c.execute("COMMIT")
                         return _row(dup), False
@@ -121,12 +146,12 @@ class Queue:
                 if waiting >= self.max_queued:
                     raise LimitError(f"queue is full ({waiting}/{self.max_queued} waiting)")
                 used = self._used(c)
-                if used >= self.daily_limit:
+                if kind == "change" and used >= self.daily_limit:  # questions have their own, separate limit
                     raise LimitError(f"daily limit reached ({used}/{self.daily_limit} jobs in 24h)")
                 job_id = time.strftime("%Y%m%d-%H%M%S-", time.localtime(self._now())) + secrets.token_hex(3)
-                c.execute("INSERT INTO jobs (id, repo, issue, task, status, requested_by, created) "
-                          "VALUES (?,?,?,?, 'queued', ?, ?)",
-                          (job_id, repo, issue, task, requested_by, self._now()))
+                c.execute("INSERT INTO jobs (id, repo, issue, task, status, requested_by, created, pr_number, kind) "
+                          "VALUES (?,?,?,?, 'queued', ?, ?, ?, ?)",
+                          (job_id, repo, issue, task, requested_by, self._now(), pr_number, kind))
                 c.execute("COMMIT")
             except BaseException:
                 c.execute("ROLLBACK")
@@ -150,13 +175,14 @@ class Queue:
                 raise
             return self.get(nxt["id"])
 
-    def finish(self, job_id: str, status: str, pr: str | None = None, reason: str | None = None) -> bool:
+    def finish(self, job_id: str, status: str, pr: str | None = None, reason: str | None = None,
+               answer: str | None = None) -> bool:
         """Only a RUNNING job can finish: a late result never overwrites cancelled/failed rows."""
         if status not in FINAL:
             raise ValueError(f"not a final status: {status}")
         with self._conn() as c:
-            cur = c.execute("UPDATE jobs SET status=?, finished=?, pr=?, reason=? WHERE id=? AND status='running'",
-                            (status, self._now(), pr, reason, job_id))
+            cur = c.execute("UPDATE jobs SET status=?, finished=?, pr=?, reason=?, answer=? "
+                            "WHERE id=? AND status='running'", (status, self._now(), pr, reason, answer, job_id))
             return cur.rowcount == 1
 
     def cancel(self, job_id: str) -> str:
@@ -202,9 +228,22 @@ class Queue:
 
     def used_by(self, requester: str) -> int:
         with self._conn() as c:
-            return c.execute("SELECT COUNT(*) FROM jobs WHERE requested_by=? AND created>=? "
+            return c.execute("SELECT COUNT(*) FROM jobs WHERE kind='change' AND requested_by=? AND created>=? "
                              "AND (status!='cancelled' OR started IS NOT NULL)",
                              (requester, self._now() - DAY)).fetchone()[0]
+
+    def record_action(self, requester: str, kind: str) -> None:
+        with self._conn() as c:
+            c.execute("INSERT INTO actions (ts, requester, kind) VALUES (?,?,?)", (self._now(), requester, kind))
+
+    def actions_by(self, requester: str, kind: str | None = None, exclude_kind: str | None = None) -> int:
+        sql, args = "SELECT COUNT(*) FROM actions WHERE requester=? AND ts>=?", [requester, self._now() - DAY]
+        if kind is not None:
+            sql, args = sql + " AND kind=?", args + [kind]
+        if exclude_kind is not None:
+            sql, args = sql + " AND kind!=?", args + [exclude_kind]
+        with self._conn() as c:
+            return c.execute(sql, args).fetchone()[0]
 
     def used_today(self) -> int:
         with self._conn() as c:

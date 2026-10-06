@@ -13,12 +13,16 @@ from .runner import CONF_DIR, safe
 
 
 def format_event(event: str, row: JobRow) -> str | None:
+    if getattr(row, "kind", "change") == "ask":
+        return None  # a question is answered in the chat itself, no extra messages
+    pr_number = getattr(row, "pr_number", None)
     if event == "started":
-        return f"Started: {row.repo}\n{safe(row.task.splitlines()[0] if row.task.strip() else 'task', 80)}"
+        what = f"{row.repo} PR #{pr_number}" if pr_number else row.repo
+        return f"Started: {what}\n{safe(row.task.splitlines()[0] if row.task.strip() else 'task', 80)}"
     if event != "finished":
         return None
     if row.status == "pr-open":
-        return f"Draft PR ready: {row.pr}"
+        return f"PR updated: {row.pr}" if pr_number else f"Draft PR ready: {row.pr}"
     if row.status == "no-changes":
         return f"No changes were needed ({row.repo})."
     if row.status == "cancelled":

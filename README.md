@@ -42,7 +42,14 @@ Give a repo `allowed_authors = ["your-login"]` in the config and the daemon poll
 
 ### From a chat agent (MCP)
 
-If `~/.config/son-of-anton/bridge-token` exists, `anton serve` also opens an MCP endpoint on `127.0.0.1:8765` (bearer token, loopback only) with the tools `anton_create_task`, `anton_queue_issue`, `anton_status`, `anton_cancel` and `anton_list_repos`. They use the same submit path as everything else, plus a smaller daily quota for the chat agent (`bridge_daily_limit`), because it can be prompt-injected. Put `telegram-token` and `telegram-chat` next to it to get a message when a job starts or ends.
+If `~/.config/son-of-anton/bridge-token` exists (one token file per chat client, e.g. `bridge-token-anton`), `anton serve` also opens an MCP endpoint on `127.0.0.1:8765` (bearer token, loopback only). Tools:
+
+- **Ask** a question about a repo: `anton_ask`, `anton_answer`. Read-only (Claude gets only Read, Glob and Grep, no Bash), the answer comes back in the chat in the language of the question. Nothing is created.
+- **Change code**: `anton_create_task` (new draft PR), `anton_update_pr` (add a commit to any open PR of an allowed repo, no force push, never the default or a protected branch, no forks), `anton_queue_issue`.
+- **Issues**: `anton_create_issue`, `anton_get_issue`, `anton_update_issue` (prefer `append`), `anton_comment`. Texts are published without @-mentions and closing keywords, and what you read from GitHub is handed to the agent marked as untrusted data.
+- `anton_status`, `anton_cancel`, `anton_list_repos`.
+
+They use the same submit path as everything else, plus smaller per-client quotas (`bridge_daily_limit` jobs, `bridge_write_limit` GitHub writes, `bridge_ask_limit` questions), because a chat agent can be prompt-injected. Put `telegram-token` and `telegram-chat` next to it to get a message when a job starts or ends.
 
 ## Setup
 
@@ -55,7 +62,8 @@ If `~/.config/son-of-anton/bridge-token` exists, `anton serve` also opens an MCP
 
 ```
 anton selftest                          # try to escape the sandbox; must pass 100%
-anton enqueue --repo o/r --task "..."   # add a job
+anton enqueue --repo o/r --task "..."   # add a job (--pr N: add a commit to that open PR)
+anton ask --repo o/r --question "..."   # read-only question, prints the answer
 anton queue [--active]                  # queue and 24h budget
 anton poll --once                       # check GitHub for labelled issues now
 anton serve                             # run the worker pool

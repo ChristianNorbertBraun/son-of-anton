@@ -79,6 +79,13 @@ def assert_pushable(branch: str, base: str) -> None:
         raise RuntimeError(f"refusing to push branch {branch!r}")
 
 
+def assert_updatable(branch: str, base: str) -> None:
+    """Pushing to the branch of an EXISTING pull request: any normal branch, never the base branch."""
+    from .prs import safe_branch  # local import: prs is a leaf module, gitops is imported first
+    if branch == base or not safe_branch(branch):
+        raise RuntimeError(f"refusing to push branch {branch!r}")
+
+
 def _hit(path: str, pattern: str) -> bool:
     p, q = path.casefold(), pattern.casefold()
     return fnmatch.fnmatchcase(p, q) or fnmatch.fnmatchcase(p, "*/" + q)

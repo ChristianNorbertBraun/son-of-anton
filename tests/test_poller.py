@@ -196,10 +196,11 @@ class GitHubClientTests(unittest.TestCase):
         self.minted.append(permissions)
         return f"tok{len(self.minted)}"
 
-    def test_token_has_only_the_issues_permission_and_is_cached(self):
+    def test_token_has_only_the_needed_permissions_and_is_cached(self):
         self.gh.issues("anton")
         self.gh.comment(1, "hi")
-        self.assertEqual(self.minted, [{"issues": "write"}])
+        # issues: write; pull requests and contents only to READ a PR and its branch
+        self.assertEqual(self.minted, [{"issues": "write", "pull_requests": "read", "contents": "read"}])
         self.now[0] = 46 * 60
         self.gh.comment(1, "again")
         self.assertEqual(len(self.minted), 2)  # renewed after 45 minutes

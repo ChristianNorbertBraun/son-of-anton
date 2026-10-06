@@ -55,7 +55,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(init["result"]["serverInfo"]["name"], "son-of-anton")
         self.assertIsNone(self.b.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         names = [t["name"] for t in self.b.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
-        self.assertEqual(names, ["anton_create_task", "anton_queue_issue", "anton_status", "anton_cancel",
+        self.assertEqual(names, ["anton_ask", "anton_answer", "anton_create_task", "anton_update_pr",
+                                 "anton_queue_issue", "anton_create_issue", "anton_get_issue",
+                                 "anton_update_issue", "anton_comment", "anton_status", "anton_cancel",
                                  "anton_list_repos"])
         self.assertEqual(self.b.handle({"jsonrpc": "2.0", "id": 3, "method": "ping"})["result"], {})
 
@@ -107,6 +109,7 @@ class BridgeTests(unittest.TestCase):
     def test_queue_issue_refuses_pull_requests_repos_without_authors_and_bad_numbers(self):
         self.issue = {**self.issue, "pull_request": {}}
         self.assertTrue(call(self.b, "anton_queue_issue", {"repo": "o/r", "issue": 5})["isError"])
+        self.issue = {k: v for k, v in self.issue.items() if k != "pull_request"}
         self.assertIn("allowed_authors", text(call(self.b, "anton_queue_issue", {"repo": "p/q", "issue": 1})))
         self.assertTrue(call(self.b, "anton_queue_issue", {"repo": "o/r", "issue": "5"})["isError"])
         self.assertTrue(call(self.b, "anton_queue_issue", {"repo": "o/r", "issue": True})["isError"])
@@ -145,6 +148,7 @@ class HttpTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
         cls.tmp.cleanup()
 
     def post(self, body, headers=None, path="/mcp", method="POST"):
@@ -152,7 +156,9 @@ class HttpTests(unittest.TestCase):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request(method, path, body if isinstance(body, (bytes, type(None))) else json.dumps(body), h)
         resp = conn.getresponse()
-        return resp.status, resp.read()
+        data = resp.read()
+        conn.close()
+        return resp.status, data
 
     def test_server_listens_on_loopback_only(self):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
@@ -160,7 +166,7 @@ class HttpTests(unittest.TestCase):
     def test_valid_request(self):
         status, body = self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads(body)["result"]["tools"]), 5)
+        self.assertEqual(len(json.loads(body)["result"]["tools"]), 12)
 
     def test_missing_or_wrong_token_is_rejected(self):
         for headers in ({"Authorization": ""}, {"Authorization": "Bearer wrong"}, {"Authorization": TOKEN}):
@@ -188,7 +194,8 @@ class HttpTests(unittest.TestCase):
 
 class TelegramTests(unittest.TestCase):
     def row(self, **kw):
-        base = dict(id="j", repo="o/r", task="Fix footer\nsecond", status="pr-open", pr="https://x/pr/1", reason=None)
+        base = dict(id="j", repo="o/r", task="Fix footer\nsecond", status="pr-open", pr="https://x/pr/1", reason=None,
+                    pr_number=None)
         return mock.Mock(**{**base, **kw})
 
     def test_messages(self):

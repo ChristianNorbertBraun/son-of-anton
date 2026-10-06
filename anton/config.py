@@ -68,6 +68,8 @@ class DaemonConfig:
     poll_seconds: int = 120
     bridge_port: int = 8765  # MCP endpoint for the chat agent, 127.0.0.1 only
     bridge_daily_limit: int = 5  # jobs the chat agent may start per rolling 24h (it can be prompt-injected)
+    bridge_write_limit: int = 30  # GitHub write actions (issues, comments) per chat client and 24h
+    bridge_ask_limit: int = 30  # read-only questions about a repo per chat client and 24h
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,8 @@ def parse_daemon(data: dict) -> DaemonConfig:
         poll_seconds=_int(d.get("poll_seconds", 120), "daemon.poll_seconds", 30, 86400),
         bridge_port=_int(d.get("bridge_port", 8765), "daemon.bridge_port", 1024, 65535),
         bridge_daily_limit=_int(d.get("bridge_daily_limit", 5), "daemon.bridge_daily_limit", 1, 100),
+        bridge_write_limit=_int(d.get("bridge_write_limit", 30), "daemon.bridge_write_limit", 1, 500),
+        bridge_ask_limit=_int(d.get("bridge_ask_limit", 30), "daemon.bridge_ask_limit", 1, 500),
     )
     return cfg
 

@@ -41,10 +41,11 @@ class Pool:
         except Exception as e:  # notifications must never break job handling
             print(f"pool: event handler failed: {type(e).__name__}", file=sys.stderr)
 
-    def _finish(self, row: JobRow, status: str, pr: str | None, reason: str | None) -> None:
+    def _finish(self, row: JobRow, status: str, pr: str | None, reason: str | None,
+                answer: str | None = None) -> None:
         for attempt in range(3):  # a busy database must not leave a row stuck in 'running'
             try:
-                self.queue.finish(row.id, status, pr, reason)
+                self.queue.finish(row.id, status, pr, reason, answer)
                 return
             except Exception as e:
                 print(f"pool: finish({row.id}) failed (attempt {attempt + 1}): {e}", file=sys.stderr)
@@ -53,7 +54,7 @@ class Pool:
     def _work(self, row: JobRow) -> None:
         try:
             out = self.run_fn(row, lambda: self.queue.is_cancel_requested(row.id))
-            self._finish(row, out.status, out.pr, out.reason)
+            self._finish(row, out.status, out.pr, out.reason, out.answer)
         except Exception as e:
             self._finish(row, "failed", None, f"{type(e).__name__}: {e}"[:300])
         self._emit("finished", row)

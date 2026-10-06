@@ -40,9 +40,13 @@ def last_labeler(events: list[dict], label: str) -> str | None:
     return actor
 
 
-def poll_once(repo: RepoConfig, gh, service: Service, seen: set | None = None) -> PollResult:
+def poll_once(repo: RepoConfig, gh, service: Service, seen: set | None = None,
+              trusted_extra: tuple[str, ...] = ()) -> PollResult:
+    """`trusted_extra`: additional AUTHORS (our own bot: an issue it created for the user may be started by
+    the user's label). Label setters must still be in allowed_authors."""
     seen = seen if seen is not None else set()
     allowed = {a.lower() for a in repo.allowed_authors}
+    authors = allowed | {a.lower() for a in trusted_extra}
     labels = state_labels(repo.trigger_label)
     res = PollResult()
 
@@ -57,7 +61,7 @@ def poll_once(repo: RepoConfig, gh, service: Service, seen: set | None = None) -
             continue
         number = issue["number"]
         author = (issue.get("user") or {}).get("login", "")
-        if author.lower() not in allowed:
+        if author.lower() not in authors:
             ignore(number, f"author {safe(author, 40)!r} is not allowed")
             continue
         actor = last_labeler(gh.events(number), repo.trigger_label)
@@ -126,7 +130,7 @@ def poll_forever(settings: Settings, service: Service, gh_for: Callable[[RepoCon
                 if repo.slug not in ready:
                     gh.ensure_labels(repo.trigger_label)
                     ready.add(repo.slug)
-                res = poll_once(repo, gh, service, seen)
+                res = poll_once(repo, gh, service, seen, trusted_extra=(settings.github.bot_name,))
                 for n in res.queued:
                     log(f"poller: queued {repo.slug}#{n}")
                 for n, why in res.ignored:
