@@ -32,6 +32,8 @@ installation_id = 12345678       # the app installation on this repo
 base = "main"
 install = "npm ci --ignore-scripts --no-audit --no-fund"   # no postinstall scripts
 protected_paths = ["gh-pages.js", "package-lock.json"]
+allowed_authors = ["your-github-login"]   # ONLY issues by these logins, labelled by these logins, start jobs
+trigger_label = "anton"                   # state labels anton:queued / :running / :pr / :failed are managed
 
 [[repos."your-name/your-site".checks]]
 name = "build"

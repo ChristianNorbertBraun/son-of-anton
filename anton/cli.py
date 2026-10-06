@@ -10,7 +10,9 @@ import sys
 import threading
 from pathlib import Path
 
-from . import config, runner
+from . import config, poller, runner
+from .events import Dispatcher
+from .github import GitHub
 from .pool import Pool
 from .queue import InputError, LimitError, Queue
 from .runner import safe
@@ -23,6 +25,18 @@ LOCK_PATH = STATE_DIR / "serve.lock"
 
 def open_queue(settings: config.Settings) -> Queue:
     return Queue(DB_PATH, daily_limit=settings.daemon.daily_limit, max_queued=settings.daemon.max_queued)
+
+
+def github_factory(settings: config.Settings):
+    """One GitHub client per repo, so the installation token is reused instead of minted per call."""
+    clients: dict[str, GitHub] = {}
+
+    def gh_for(repo: config.RepoConfig) -> GitHub:
+        if repo.slug not in clients:
+            clients[repo.slug] = GitHub(settings.github.app_id, runner.KEY_PATH, repo)
+        return clients[repo.slug]
+
+    return gh_for
 
 
 def cmd_run(a: argparse.Namespace) -> int:
@@ -76,16 +90,46 @@ def cmd_serve(a: argparse.Namespace) -> int:
     removed = runner.gc_jobs(lambda job_id: (r := q.get(job_id)) is not None and r.status == "running")
     print(f"anton serve: max_parallel={settings.daemon.max_parallel} daily_limit={settings.daemon.daily_limit} "
           f"dry_run={dry} recovered_failed={failed} gc_removed={removed}", flush=True)
+    gh_for = github_factory(settings)
+    svc = Service(q, settings.repos)
+
+    def log_event(ev, row):
+        print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True)
+
+    dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for)])
     pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry), settings.daemon.max_parallel,
-                on_event=lambda ev, row: print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True))
+                on_event=dispatcher.emit)
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
+    polling = [r.slug for r in settings.repos.values() if r.allowed_authors]
+    if polling:
+        print(f"anton serve: polling labels on {', '.join(polling)} every {settings.daemon.poll_seconds}s", flush=True)
+        threading.Thread(target=poller.poll_forever, args=(settings, svc, gh_for, stop), name="poller",
+                         daemon=True).start()
     pool.run_forever(stop)
     print("anton serve: stopping, waiting for running jobs", flush=True)
     left = pool.drain(timeout=60)
+    dispatcher.stop()
     if left:
         print(f"anton serve: {left} job(s) still running, they will be marked failed on next start", flush=True)
+    return 0
+
+
+def cmd_poll(a: argparse.Namespace) -> int:
+    """Check GitHub for labelled issues once and queue what qualifies (the daemon does this on a timer)."""
+    settings = config.load_settings()
+    svc = Service(open_queue(settings), settings.repos)
+    gh_for = github_factory(settings)
+    for repo in settings.repos.values():
+        if not repo.allowed_authors:
+            continue
+        gh = gh_for(repo)
+        gh.ensure_labels(repo.trigger_label)
+        res = poller.poll_once(repo, gh, svc)
+        print(f"{repo.slug}: queued={res.queued} limited={res.limited}")
+        for n, why in res.ignored:
+            print(f"  ignored #{n}: {why}")
     return 0
 
 
@@ -125,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
     c.set_defaults(fn=cmd_cancel)
     s = sub.add_parser("serve", help="run the worker pool (daemon)")
     s.set_defaults(fn=cmd_serve)
+    po = sub.add_parser("poll", help="check GitHub for labelled issues once")
+    po.add_argument("--once", action="store_true", required=True)
+    po.set_defaults(fn=cmd_poll)
     j = sub.add_parser("jobs", help="list job directories")
     j.set_defaults(fn=cmd_jobs)
     st = sub.add_parser("selftest", help="try to escape the sandbox (must pass before untrusted input)")

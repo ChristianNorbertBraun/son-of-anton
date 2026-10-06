@@ -36,7 +36,11 @@ Good tasks are concrete and small, and say what to leave alone. Vague ones ("imp
 
 `~/jobs/<id>/` is **not** an inbox. It only holds the log and result of one finished job (`log.txt`, `job.json`, `claude.json`); the checkout is deleted afterwards.
 
-Status: tasks come in through the CLI today. A GitHub label (`anton` on an issue) and a chat bridge are planned and will create jobs the same way.
+### From a GitHub issue
+
+Give a repo `allowed_authors = ["your-login"]` in the config and the daemon polls it. Put the label `anton` on an issue and it becomes a job (title and body are the task). A job starts only if **both** the issue's author **and** the user who set the label are in `allowed_authors`; everything else is ignored silently, and issue comments are never read. The label then moves through `anton:queued` → `anton:running` → `anton:pr` (with a comment linking the draft PR) or `anton:failed`. To retry, put `anton` on it again. `anton poll --once` checks right now instead of waiting.
+
+A chat bridge is planned and will create jobs through the same submit path.
 
 ## Setup
 
@@ -51,6 +55,7 @@ Status: tasks come in through the CLI today. A GitHub label (`anton` on an issue
 anton selftest                          # try to escape the sandbox; must pass 100%
 anton enqueue --repo o/r --task "..."   # add a job
 anton queue [--active]                  # queue and 24h budget
+anton poll --once                       # check GitHub for labelled issues now
 anton serve                             # run the worker pool
 anton cancel <job-id>
 anton run --repo o/r --task "..." [--dry-run]   # one job now, no queue

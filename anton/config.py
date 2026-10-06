@@ -49,6 +49,8 @@ class RepoConfig:
     max_turns: int
     timeout_minutes: int
     model: str
+    allowed_authors: tuple[str, ...] = ()  # GitHub logins whose issues may trigger jobs; empty = polling off
+    trigger_label: str = "anton"
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,24 @@ def _str_list(value, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
         raise ConfigError(f"{where}: must be a list of non-empty strings")
     return tuple(value)
+
+
+LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?")
+LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,30}")
+
+
+def _authors(value, where: str) -> tuple[str, ...]:
+    logins = _str_list(value, where)
+    for login in logins:
+        if not LOGIN_RE.fullmatch(login):
+            raise ConfigError(f"{where}: {login!r} is not a valid GitHub login")
+    return logins
+
+
+def _label(value, where: str) -> str:
+    if not (isinstance(value, str) and LABEL_RE.fullmatch(value)):
+        raise ConfigError(f"{where}: invalid label name")
+    return value
 
 
 def _checks(raw, where: str) -> tuple[Check, ...]:
@@ -182,6 +202,8 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
             timeout_minutes=_int(r.get("timeout_minutes", defaults.get("timeout_minutes", 30)),
                                  f"{w}.timeout_minutes", 1, 120),
             model=model,
+            allowed_authors=_authors(r.get("allowed_authors", []), f"{w}.allowed_authors"),
+            trigger_label=_label(r.get("trigger_label", "anton"), f"{w}.trigger_label"),
         )
     return repos
 
