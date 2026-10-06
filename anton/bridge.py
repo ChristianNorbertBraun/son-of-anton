@@ -27,11 +27,14 @@ MAX_TEXT = 3000
 TOOLS = [
     {"name": "anton_create_task",
      "description": "Queue a coding task for Son of Anton (Claude Code) in an allowlisted GitHub repo. It "
-                    "implements the task in a sandbox and opens a DRAFT pull request. Only call this after "
-                    "the user explicitly asked for it and confirmed the task text.",
+                    "explores the repository itself, implements the task in a sandbox and opens a DRAFT pull "
+                    "request. Pass the user's request in their own words: file names or technical details are "
+                    "NOT needed. Only call this after the user asked for it and confirmed.",
      "inputSchema": {"type": "object", "required": ["repo", "task"], "properties": {
-         "repo": {"type": "string", "description": "owner/name, must be on the allowlist (see anton_list_repos)"},
-         "task": {"type": "string", "description": "Concrete instructions, what to change and what to leave alone"}}}},
+         "repo": {"type": "string", "description": "owner/name from anton_list_repos. If only one repo fits "
+                                                   "(or the user says 'my website'), use it without asking"},
+         "task": {"type": "string", "description": "The user's request in plain words, plus anything they said "
+                                                   "to leave alone. No file names required"}}}},
     {"name": "anton_queue_issue",
      "description": "Queue an existing GitHub issue (title and body become the task). Only issues written "
                     "by an allowed author are accepted.",
