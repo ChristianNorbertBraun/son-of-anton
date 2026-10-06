@@ -14,6 +14,30 @@ Task → queue → fresh clone → Claude Code implements it in a sandbox → ch
 - **Gates:** `gate` checks must pass, `regression` checks must not get worse. Changes to protected paths fail the job.
 - **Queue:** SQLite, limited parallelism, daily limit, no duplicate jobs per issue.
 
+## Using it
+
+A **job** is one task for one repository: a repo (`owner/name`, must be on your allowlist), a **task text** (plain instructions, like you would write to a colleague, up to 20,000 characters) and optionally an issue number. Jobs live in a small SQLite queue, not in a folder of files.
+
+```
+anton serve                       # 1. the worker: leave it running, it takes jobs from the queue
+
+anton enqueue --repo you/your-site --task \
+  "Fix the TypeScript error in dateString(): parameter 'date' has an implicit any type.
+   Smallest correct change, leave unrelated code alone."      # 2. add a job from any shell
+
+anton queue --active              # 3. watch it
+```
+
+A job goes `queued` → `running` (clone, install, baseline checks, Claude, checks again) and ends as
+`pr-open` (a draft PR is waiting for you), `no-changes`, `failed` (the reason is shown) or `cancelled`.
+At most a few jobs run in parallel and a daily limit applies (see `[daemon]` in the config).
+
+Good tasks are concrete and small, and say what to leave alone. Vague ones ("improve the site") give vague PRs.
+
+`~/jobs/<id>/` is **not** an inbox. It only holds the log and result of one finished job (`log.txt`, `job.json`, `claude.json`); the checkout is deleted afterwards.
+
+Status: tasks come in through the CLI today. A GitHub label (`anton` on an issue) and a chat bridge are planned and will create jobs the same way.
+
 ## Setup
 
 1. Dedicated unprivileged user; `python3` (3.11+), `git`, `openssl`, `bubblewrap`, Node for your projects.

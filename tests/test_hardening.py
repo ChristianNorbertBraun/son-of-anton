@@ -326,6 +326,32 @@ class RunnerPieceTests(unittest.TestCase):
         self.assertIn("Bash(curl:*)", deny)
         self.assertTrue(any(str(runner.CONF_DIR) in d for d in deny))
 
+    def test_absolute_deny_rules_use_the_double_slash_form(self):
+        # `Read(/etc/**)` is project-relative and blocks nothing; verified against the real CLI
+        deny = json.loads(runner.claude_settings(repos()))["permissions"]["deny"]
+        for tool, path in (("Read", "/proc"), ("Read", "/sys"), ("Read", "/etc"), ("Read", str(runner.CONF_DIR))):
+            self.assertIn(f"{tool}(/{path}/**)", deny)
+        self.assertEqual(runner.abs_rule("Read", "/proc"), "Read(//proc/**)")
+        self.assertFalse(any(d.startswith("Read(/") and not d.startswith("Read(//") for d in deny))
+
+    def test_scrub_removes_the_token_everywhere(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(runner, "CONF_DIR", Path(d)):
+            (Path(d) / "claude-token").write_text("tok-abcdefghijklmnop\n")
+            out = runner.scrub("leak: tok-abcdefghijklmnop and sk-ant-oat01-ABCDEFGH_xyz here")
+            self.assertNotIn("tok-abcdefghijklmnop", out)
+            self.assertNotIn("sk-ant-", out)
+            self.assertEqual(out.count("[redacted]"), 2)
+            self.assertNotIn("tok-abcdefghijklmnop", runner.safe("x tok-abcdefghijklmnop y"))
+            self.assertNotIn("tok-abcdefghijklmnop", runner.neutralize("summary tok-abcdefghijklmnop"))
+
+    def test_scrub_works_without_a_token_file(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(runner, "CONF_DIR", Path(d)):
+            self.assertEqual(runner.scrub("plain text"), "plain text")
+
+    def test_example_installs_without_lifecycle_scripts(self):
+        r = config.load_repos(Path(__file__).parent.parent / "examples/repos.toml")["your-name/your-site"]
+        self.assertIn("--ignore-scripts", r.install)
+
     def test_neutralize_blocks_mentions_links_and_closing_keywords(self):
         out = runner.neutralize("Fixes #12 cc @octocat and @org/team\nsecond line")
         self.assertNotIn("@octocat", out)

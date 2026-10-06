@@ -30,7 +30,7 @@ deny_tools = [
 [repos."your-name/your-site"]
 installation_id = 12345678       # the app installation on this repo
 base = "main"
-install = "npm ci --no-audit --no-fund"
+install = "npm ci --ignore-scripts --no-audit --no-fund"   # no postinstall scripts
 protected_paths = ["gh-pages.js", "package-lock.json"]
 
 [[repos."your-name/your-site".checks]]

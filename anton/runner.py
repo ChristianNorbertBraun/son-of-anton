@@ -38,9 +38,22 @@ SYSTEM_RULES = (
 )
 
 
+SECRET_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}")
+
+
+def scrub(text) -> str:
+    """Remove the Claude token (exact value and the sk-ant-... shape) from anything we log or publish."""
+    text = SECRET_RE.sub("[redacted]", str(text))
+    try:
+        token = (CONF_DIR / "claude-token").read_text().strip()
+    except OSError:
+        return text
+    return text.replace(token, "[redacted]") if len(token) >= 12 else text
+
+
 def safe(text, limit: int = 300) -> str:
-    """One line, no control characters: safe for logs, terminals and chat messages."""
-    return re.sub(r"[\x00-\x1f\x7f\x9b]", "?", str(text))[:limit]
+    """One line, no control characters, no secrets: safe for logs, terminals and chat messages."""
+    return re.sub(r"[\x00-\x1f\x7f\x9b]", "?", scrub(text))[:limit]
 
 
 @dataclass
@@ -119,9 +132,15 @@ def run_checks(job: Job, label: str, should_cancel: Callable[[], bool]) -> dict[
     return results
 
 
+def abs_rule(tool: str, path: Path | str) -> str:
+    """Claude Code permission rules treat `/x` as project-relative; absolute paths need `//x`."""
+    return f"{tool}(/{str(path).rstrip('/')}/**)"
+
+
 def claude_settings(repo: RepoConfig) -> str:
-    deny = [*repo.deny_tools, f"Read({CONF_DIR}/**)", f"Read({JOBS_DIR}/**)", "Read(/etc/**)",
-            f"Edit({CONF_DIR}/**)"]
+    # /proc/self/environ would hand the agent its own Claude token (and then the PR text)
+    deny = [*repo.deny_tools, abs_rule("Read", "/proc"), abs_rule("Read", "/sys"), abs_rule("Read", "/etc"),
+            abs_rule("Read", CONF_DIR), abs_rule("Read", JOBS_DIR), abs_rule("Edit", CONF_DIR)]
     return json.dumps({"permissions": {"deny": deny}})
 
 
@@ -141,7 +160,7 @@ def run_claude(job: Job, should_cancel: Callable[[], bool]) -> dict:
                                       limit=CLAUDE_OUT_LIMIT, tail=False, stdin_text=prompt,
                                       should_cancel=should_cancel)
     path = job.dir / "claude.json"
-    path.write_text(out)
+    path.write_text(scrub(out))
     os.chmod(path, 0o600)
     if code == 124:
         raise RuntimeError("claude timed out")
@@ -155,7 +174,7 @@ def run_claude(job: Job, should_cancel: Callable[[], bool]) -> dict:
 
 def neutralize(text: str) -> str:
     """Claude's summary may echo hostile issue text: no @-mentions, no #N links, no closing keywords."""
-    text = str(text)[:SUMMARY_LIMIT].replace("@", "@​")
+    text = scrub(str(text)[:SUMMARY_LIMIT]).replace("@", "@​")
     text = re.sub(r"#(\d+)", "#​\\1", text)
     return "\n".join("> " + ln for ln in text.splitlines()) or "> (no summary)"
 
