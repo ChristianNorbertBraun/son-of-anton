@@ -6,13 +6,14 @@ Runs [Claude Code](https://code.claude.com) on a Raspberry Pi and turns tasks in
 
 ## How it works
 
-Task → queue → fresh clone → Claude Code implements it in a sandbox → checks → draft PR.
+Task → queue → fresh clone → Claude Code implements it in a sandbox → checks → draft PR. The same machinery can also **add a commit to an existing PR** and **answer a read-only question** about a repo.
 
 - **Sandbox:** `npm`, your checks and Claude run in [bubblewrap](https://github.com/containers/bubblewrap): system read-only, checkout at `/work` (`.git` read-only), no access to keys or tokens.
-- **Claude** runs headless (`claude -p`) with a tool allow/deny list and turn and time limits. It cannot run git, gh, curl or deploy commands.
+- **Claude** runs headless (`claude -p`, the task goes in on stdin) with a tool allow/deny list and turn and time limits. It cannot run git, gh, curl or deploy commands. Installing dependencies (`npm install`) and web research (`WebSearch`, `WebFetch`) are opt-in per repo through `allow_tools`; install scripts never run, whoever types `npm install`.
 - **The runner, not Claude,** commits and pushes an `anton/*` branch, using a short-lived GitHub App token scoped to that one repo.
 - **Gates:** `gate` checks must pass, `regression` checks must not get worse. Changes to protected paths fail the job.
-- **Queue:** SQLite, limited parallelism, daily limit, no duplicate jobs per issue.
+- **Queue:** SQLite, limited parallelism, daily limits, no duplicate jobs per issue or PR.
+- **English artifacts:** Claude starts its answer with `TITLE: <imperative English title>` and writes code, comments and the summary in English, whatever language the task is in. The runner derives the commit message, the PR title and the (ASCII) branch name from that title.
 
 ## Using it
 
@@ -32,7 +33,9 @@ A job goes `queued` → `running` (clone, install, baseline checks, Claude, chec
 `pr-open` (a draft PR is waiting for you), `no-changes`, `failed` (the reason is shown) or `cancelled`.
 At most a few jobs run in parallel and a daily limit applies (see `[daemon]` in the config).
 
-Good tasks are concrete and small, and say what to leave alone. Vague ones ("improve the site") give vague PRs.
+Good tasks are concrete and small, and say what to leave alone. Vague ones ("improve the site") give vague PRs. File names are not needed: Claude explores the repo itself.
+
+`anton enqueue --pr 7 --task "..."` adds a commit to the branch of an open PR instead (same repository only, never the default or a protected branch, plain push, no force). `anton ask --repo o/r --question "..."` answers a question without creating anything.
 
 `~/jobs/<id>/` is **not** an inbox. It only holds the log and result of one finished job (`log.txt`, `job.json`, `claude.json`); the checkout is deleted afterwards.
 
@@ -56,7 +59,7 @@ They use the same submit path as everything else, plus smaller per-client quotas
 1. Dedicated unprivileged user; `python3` (3.11+), `git`, `openssl`, `bubblewrap`, Node for your projects.
 2. Claude Code for that user and a token from `claude setup-token`.
 3. A GitHub App (webhook off; Contents, Issues, Pull requests = write; no Workflows), installed only on allowed repos. Key in `~/.config/son-of-anton/app-key.pem` (mode 600).
-4. `examples/repos.toml` → `~/.config/son-of-anton/repos.toml`, fill in your values. Only `github.com` is accepted.
+4. `examples/repos.toml` → `~/.config/son-of-anton/repos.toml`, fill in your values. Only `github.com` is accepted. Per repo: `checks` (`gate` must pass, `regression` must not get worse; `metric` or `metric_lines` count the problems), `protected_paths`, `allow_tools` / `deny_tools` (a mandatory deny floor can only be extended), `allowed_authors` and `trigger_label` for the issue trigger, and the `[daemon]` limits.
 
 ## Commands
 
@@ -76,7 +79,7 @@ Tests: `python3 -m unittest discover -s tests`
 ## Limits
 
 - The network stays open, so a manipulated agent could send the Claude token out, and the sandbox can reach loopback and LAN services. Use a dedicated machine and add an egress rule for the runner user. `anton selftest` reports this as a known gap.
-- You review every PR; a merge is only as safe as that review.
+- You review every PR; a merge is only as safe as that review. Look at dependency changes in particular: a new package is run by your CI at merge time.
 - No egress filter, no fork mode. Check the current terms before using a subscription for unattended automation.
 
 ## License
