@@ -24,7 +24,10 @@ class WrapTests(unittest.TestCase):
     def test_command_comes_last_after_separator(self):
         cmd = self.wrap()
         self.assertEqual(cmd[0], "bwrap")
-        self.assertEqual(cmd[-3:], ["--", "echo", "hi"])
+        self.assertEqual(cmd[-3:], ["_", "echo", "hi"])  # "_" is $0 of the limit wrapper
+        i = cmd.index("--")
+        self.assertEqual(cmd[i + 1:i + 3], ["bash", "-c"])
+        self.assertIn("ulimit -f", cmd[i + 3])
 
     def test_isolation_flags(self):
         cmd = self.wrap()

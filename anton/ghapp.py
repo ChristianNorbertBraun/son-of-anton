@@ -47,10 +47,11 @@ def api(method: str, path: str, token: str, body: dict | None = None) -> dict:
         raise RuntimeError(f"GitHub API {method} {path}: {e.code} {e.read()[:300]!r}") from None
 
 
-def installation_token(app_id: int | str, key_path: Path, installation_id: int, repo: str) -> str:
-    """Token scoped to ONE repository, even if the installation covers more."""
+def installation_token(app_id: int | str, key_path: Path, installation_id: int, repo: str,
+                       permissions: dict[str, str]) -> str:
+    """Token scoped to ONE repository and to exactly the permissions the step needs."""
     jwt = make_jwt(app_id, key_path)
     name = repo.split("/", 1)[1]
     res = api("POST", f"/app/installations/{installation_id}/access_tokens", jwt,
-              {"repositories": [name]})
+              {"repositories": [name], "permissions": permissions})
     return res["token"]

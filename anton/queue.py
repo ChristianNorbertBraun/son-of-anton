@@ -1,7 +1,9 @@
-"""Persistent job queue (SQLite). Survives restarts, dedupes issue jobs, enforces a daily limit."""
+"""Persistent job queue (SQLite). Survives restarts, dedupes issue jobs, bounds every input."""
 from __future__ import annotations
 
 import contextlib
+import os
+import re
 import secrets
 import sqlite3
 import time
@@ -9,9 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
+from .config import SLUG_RE
+
 ACTIVE = ("queued", "running")
 FINAL = ("pr-open", "no-changes", "failed", "cancelled")
 DAY = 86400
+MAX_TASK_CHARS = 20_000
+REQUESTER_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -25,6 +31,10 @@ CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, created);
 
 
 class LimitError(Exception):
+    pass
+
+
+class InputError(ValueError):
     pass
 
 
@@ -50,12 +60,29 @@ def _row(r: sqlite3.Row) -> JobRow:
     return JobRow(**d)
 
 
+def validate(repo: str, task: str, issue: int | None, requested_by: str) -> None:
+    if not isinstance(repo, str) or not SLUG_RE.fullmatch(repo):
+        raise InputError("invalid repo")
+    if not isinstance(task, str) or not task.strip():
+        raise InputError("task must not be empty")
+    if len(task) > MAX_TASK_CHARS or "\0" in task:
+        raise InputError(f"task too long (max {MAX_TASK_CHARS} characters) or contains NUL")
+    if issue is not None and (isinstance(issue, bool) or not isinstance(issue, int) or not 0 < issue < 2**31):
+        raise InputError("issue must be an integer between 1 and 2^31-1")
+    if not isinstance(requested_by, str) or not REQUESTER_RE.fullmatch(requested_by):
+        raise InputError("invalid requested_by")
+
+
 class Queue:
-    def __init__(self, path: Path, clock: Callable[[], float] = time.time, daily_limit: int = 10):
-        self.path, self.clock, self.daily_limit = Path(path), clock, daily_limit
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time, daily_limit: int = 10,
+                 max_queued: int = 20):
+        self.path, self.clock = Path(path), clock
+        self.daily_limit, self.max_queued = daily_limit, max_queued
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
         with self._conn() as c:
             c.executescript(SCHEMA)
+        os.chmod(self.path, 0o600)  # task texts are private
 
     @contextlib.contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -71,9 +98,15 @@ class Queue:
     def _now(self) -> int:
         return int(self.clock())
 
+    def _used(self, c: sqlite3.Connection) -> int:
+        # a job that actually started cost Claude tokens, even if it was cancelled afterwards
+        return c.execute("SELECT COUNT(*) FROM jobs WHERE created>=? AND (status!='cancelled' OR started IS NOT NULL)",
+                         (self._now() - DAY,)).fetchone()[0]
+
     def enqueue(self, repo: str, task: str, issue: int | None = None,
                 requested_by: str = "cli") -> tuple[JobRow, bool]:
         """Return (job, created). An active job for the same repo+issue is returned, not duplicated."""
+        validate(repo, task, issue, requested_by)
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             try:
@@ -84,8 +117,10 @@ class Queue:
                     if dup:
                         c.execute("COMMIT")
                         return _row(dup), False
-                used = c.execute("SELECT COUNT(*) FROM jobs WHERE created>=? AND status!='cancelled'",
-                                 (self._now() - DAY,)).fetchone()[0]
+                waiting = c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0]
+                if waiting >= self.max_queued:
+                    raise LimitError(f"queue is full ({waiting}/{self.max_queued} waiting)")
+                used = self._used(c)
                 if used >= self.daily_limit:
                     raise LimitError(f"daily limit reached ({used}/{self.daily_limit} jobs in 24h)")
                 job_id = time.strftime("%Y%m%d-%H%M%S-", time.localtime(self._now())) + secrets.token_hex(3)
@@ -115,12 +150,14 @@ class Queue:
                 raise
             return self.get(nxt["id"])
 
-    def finish(self, job_id: str, status: str, pr: str | None = None, reason: str | None = None) -> None:
+    def finish(self, job_id: str, status: str, pr: str | None = None, reason: str | None = None) -> bool:
+        """Only a RUNNING job can finish: a late result never overwrites cancelled/failed rows."""
         if status not in FINAL:
             raise ValueError(f"not a final status: {status}")
         with self._conn() as c:
-            c.execute("UPDATE jobs SET status=?, finished=?, pr=?, reason=? WHERE id=?",
-                      (status, self._now(), pr, reason, job_id))
+            cur = c.execute("UPDATE jobs SET status=?, finished=?, pr=?, reason=? WHERE id=? AND status='running'",
+                            (status, self._now(), pr, reason, job_id))
+            return cur.rowcount == 1
 
     def cancel(self, job_id: str) -> str:
         with self._conn() as c:
@@ -146,7 +183,8 @@ class Queue:
             return bool(r and r["cancel_requested"])
 
     def recover(self) -> int:
-        """After a daemon restart nothing is really running: fail those jobs honestly."""
+        """After a daemon restart nothing is really running: fail those jobs honestly.
+        Only call this while holding the serve lock (see cli.cmd_serve)."""
         with self._conn() as c:
             cur = c.execute("UPDATE jobs SET status='failed', finished=?, reason='daemon restarted' "
                             "WHERE status='running'", (self._now(),))
@@ -164,5 +202,4 @@ class Queue:
 
     def used_today(self) -> int:
         with self._conn() as c:
-            return c.execute("SELECT COUNT(*) FROM jobs WHERE created>=? AND status!='cancelled'",
-                             (self._now() - DAY,)).fetchone()[0]
+            return self._used(c)

@@ -1,7 +1,8 @@
-"""anton run | enqueue | queue | cancel | serve | jobs"""
+"""anton run | enqueue | queue | cancel | serve | jobs | selftest"""
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -11,39 +12,36 @@ from pathlib import Path
 
 from . import config, runner
 from .pool import Pool
-from .queue import LimitError, Queue
+from .queue import InputError, LimitError, Queue
+from .runner import safe
+from .service import Service
 
 STATE_DIR = Path.home() / ".local/state/son-of-anton"
 DB_PATH = STATE_DIR / "queue.db"
+LOCK_PATH = STATE_DIR / "serve.lock"
 
 
-def open_queue() -> Queue:
-    return Queue(DB_PATH, daily_limit=config.load_daemon().daily_limit)
+def open_queue(settings: config.Settings) -> Queue:
+    return Queue(DB_PATH, daily_limit=settings.daemon.daily_limit, max_queued=settings.daemon.max_queued)
 
 
 def cmd_run(a: argparse.Namespace) -> int:
-    """Run one job right now, bypassing the queue (manual / debugging)."""
-    repo = config.get_repo(config.load_repos(), a.repo)
+    """Run one job right now. Bypasses the queue, the daily limit and the parallelism cap."""
+    settings = config.load_settings()
+    repo = config.get_repo(settings.repos, a.repo)
     job = runner.new_job(repo, a.task, a.issue)
-    job.log(f"job {job.id} repo={repo.slug}")
-    try:
-        print(runner.execute(job, dry_run=a.dry_run))
-        return 0
-    except Exception as e:  # report, keep logs, free the checkout
-        job.log(f"ERROR: {e}")
-        if not (job.dir / "job.json").exists() or json.loads((job.dir / "job.json").read_text())["status"] == "running":
-            job.state("failed", reason=str(e)[:300])
-        print(f"failed: {e}", file=sys.stderr)
-        return 1
-    finally:
-        runner.cleanup(job)
+    job.log(f"job {job.id} repo={repo.slug} (direct run: no queue, no limits)")
+    out = runner.run_job(job, settings, dry_run=a.dry_run)
+    print(f"{out.status}: {out.pr or out.reason or ''}")
+    return 0 if out.status in ("pr-open", "no-changes") else 1
 
 
 def cmd_enqueue(a: argparse.Namespace) -> int:
-    config.get_repo(config.load_repos(), a.repo)  # reject unknown repos up front
+    settings = config.load_settings()
+    svc = Service(open_queue(settings), settings.repos)
     try:
-        row, created = open_queue().enqueue(a.repo, a.task, a.issue, requested_by="cli")
-    except LimitError as e:
+        row, created = svc.submit(a.repo, a.task, a.issue, requested_by="cli")
+    except (LimitError, InputError) as e:
         print(f"rejected: {e}", file=sys.stderr)
         return 1
     print(f"{'queued' if created else 'already active'}: {row.id} ({row.status})")
@@ -51,33 +49,50 @@ def cmd_enqueue(a: argparse.Namespace) -> int:
 
 
 def cmd_queue(a: argparse.Namespace) -> int:
-    q = open_queue()
+    q = open_queue(config.load_settings())
     for r in reversed(q.list(limit=a.limit, active_only=a.active)):
-        print(f"{r.id}  {r.status:<10} {r.repo}  {r.task[:48]!r}  {r.pr or r.reason or ''}")
+        print(f"{r.id}  {r.status:<10} {r.repo}  {safe(r.task, 48)!r}  {safe(r.pr or r.reason or '', 120)}")
     print(f"-- {q.used_today()}/{q.daily_limit} jobs in the last 24h")
     return 0
 
 
 def cmd_cancel(a: argparse.Namespace) -> int:
-    print(open_queue().cancel(a.id))
+    print(open_queue(config.load_settings()).cancel(a.id))
     return 0
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
-    repos, daemon = config.load_repos(), config.load_daemon()
-    q = Queue(DB_PATH, daily_limit=daemon.daily_limit)
+    settings = config.load_settings()
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+    try:  # a second daemon would fail the first one's running jobs in recover()
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another `anton serve` is already running", file=sys.stderr)
+        return 3
+    q = open_queue(settings)
     dry = os.environ.get("ANTON_DRY_RUN") == "1"
     failed = q.recover()
-    print(f"anton serve: max_parallel={daemon.max_parallel} daily_limit={daemon.daily_limit} "
-          f"dry_run={dry} recovered_failed={failed}", flush=True)
-    pool = Pool(q, lambda row, sc: runner.run_queued(row, repos, sc, dry_run=dry), daemon.max_parallel,
+    removed = runner.gc_jobs(lambda job_id: (r := q.get(job_id)) is not None and r.status == "running")
+    print(f"anton serve: max_parallel={settings.daemon.max_parallel} daily_limit={settings.daemon.daily_limit} "
+          f"dry_run={dry} recovered_failed={failed} gc_removed={removed}", flush=True)
+    pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry), settings.daemon.max_parallel,
                 on_event=lambda ev, row: print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True))
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     pool.run_forever(stop)
     print("anton serve: stopping, waiting for running jobs", flush=True)
-    pool.wait_idle(timeout=60)
+    left = pool.drain(timeout=60)
+    if left:
+        print(f"anton serve: {left} job(s) still running, they will be marked failed on next start", flush=True)
+    return 0
+
+
+def cmd_jobs(_: argparse.Namespace) -> int:
+    for p in sorted(runner.JOBS_DIR.glob("*/job.json")):
+        d = json.loads(p.read_text())
+        print(f"{d['id']}  {d['status']:<12} {d['repo']}  {safe(d['task'], 50)}  {safe(d.get('pr', ''))}")
     return 0
 
 
@@ -86,14 +101,8 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     return selftest.run()
 
 
-def cmd_jobs(_: argparse.Namespace) -> int:
-    for p in sorted(runner.JOBS_DIR.glob("*/job.json")):
-        d = json.loads(p.read_text())
-        print(f"{d['id']}  {d['status']:<12} {d['repo']}  {d['task'][:50]}  {d.get('pr', '')}")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)  # task texts, logs and the database are private
     ap = argparse.ArgumentParser(prog="anton")
     sub = ap.add_subparsers(required=True)
     r = sub.add_parser("run", help="run one job now, no queue")
@@ -124,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return a.fn(a)
     except config.ConfigError as ex:
-        print(f"config error: {ex}", file=sys.stderr)
+        print(f"config error: {safe(ex)}", file=sys.stderr)
         return 2
 
 

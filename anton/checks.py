@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .config import Check
+from .proc import run_capped
 
 
 @dataclass(frozen=True)
@@ -32,13 +32,12 @@ def parse_metric(check: Check, output: str, exit_code: int) -> int | None:
 
 
 def run_check(check: Check, cwd: Path, env: dict, timeout: int = 900,
-              wrap: Callable[[list[str]], list[str]] = lambda cmd: cmd) -> CheckResult:
-    try:
-        p = subprocess.run(wrap(["bash", "-c", check.cmd]), cwd=cwd, env=env, capture_output=True,
-                           text=True, timeout=timeout)
-        out, code = p.stdout + p.stderr, p.returncode
-    except subprocess.TimeoutExpired:
-        out, code = f"timeout after {timeout}s", 124
+              wrap: Callable[[list[str]], list[str]] = lambda cmd: cmd,
+              should_cancel: Callable[[], bool] = lambda: False) -> CheckResult:
+    code, out, _ = run_capped(wrap(["bash", "-c", check.cmd]), cwd=cwd, env=env, timeout=timeout,
+                              should_cancel=should_cancel)
+    if code == 124:
+        out += f"\ntimeout after {timeout}s"
     tail = "\n".join(out.strip().splitlines()[-12:])
     return CheckResult(check.name, check.kind, code, parse_metric(check, out, code), tail)
 

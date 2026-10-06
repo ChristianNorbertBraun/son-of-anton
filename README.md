@@ -36,7 +36,7 @@ Tests: `python3 -m unittest discover -s tests`
 
 ## Limits
 
-- The network stays open, so a manipulated agent could send the Claude token out. Use a dedicated machine.
+- The network stays open, so a manipulated agent could send the Claude token out, and the sandbox can reach loopback and LAN services. Use a dedicated machine and add an egress rule for the runner user. `anton selftest` reports this as a known gap.
 - You review every PR; a merge is only as safe as that review.
 - No egress filter, no fork mode. Check the current terms before using a subscription for unattended automation.
 

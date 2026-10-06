@@ -69,9 +69,12 @@ class GithubConfigTests(unittest.TestCase):
 
 class GitTests(unittest.TestCase):
     def test_branch_names(self):
-        self.assertEqual(gitops.branch_name(7, "20261006-120000-abcdef", "x"), "anton/issue-7")
+        self.assertEqual(gitops.branch_name(7, "20261006-120000-abcdef", "x"), "anton/issue-7-abcdef")
         b = gitops.branch_name(None, "20261006-120000-abcdef", "Fix the Footer typo!")
         self.assertEqual(b, "anton/fix-the-footer-typo-abcdef")
+        # two attempts at the same issue never collide on the remote
+        self.assertNotEqual(gitops.branch_name(7, "20261006-120000-aaaaaa", "x"),
+                            gitops.branch_name(7, "20261006-120001-bbbbbb", "x"))
         self.assertTrue(gitops.branch_name(None, "20261006-120000-abcdef", "!!!").startswith("anton/task-"))
 
     def test_never_push_base_or_foreign_branch(self):
