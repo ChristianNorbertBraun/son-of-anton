@@ -69,13 +69,20 @@ class GithubConfigTests(unittest.TestCase):
 
 class GitTests(unittest.TestCase):
     def test_branch_names(self):
-        self.assertEqual(gitops.branch_name(7, "20261006-120000-abcdef", "x"), "anton/issue-7-abcdef")
-        b = gitops.branch_name(None, "20261006-120000-abcdef", "Fix the Footer typo!")
-        self.assertEqual(b, "anton/fix-the-footer-typo-abcdef")
+        job = "20261006-120000-abcdef"
+        self.assertEqual(gitops.branch_name(7, job), "anton/issue-7-abcdef")
+        self.assertEqual(gitops.branch_name(None, job, "Fix the Footer typo!"), "anton/fix-the-footer-typo-abcdef")
+        self.assertEqual(gitops.branch_name(None, job), "anton/work-abcdef")  # neutral until Claude gave a title
+        self.assertEqual(gitops.branch_name(None, job, "!!!"), "anton/work-abcdef")
         # two attempts at the same issue never collide on the remote
-        self.assertNotEqual(gitops.branch_name(7, "20261006-120000-aaaaaa", "x"),
-                            gitops.branch_name(7, "20261006-120001-bbbbbb", "x"))
-        self.assertTrue(gitops.branch_name(None, "20261006-120000-abcdef", "!!!").startswith("anton/task-"))
+        self.assertNotEqual(gitops.branch_name(7, "20261006-120000-aaaaaa"), gitops.branch_name(7, "20261006-120001-bbbbbb"))
+
+    def test_branch_names_are_always_plain_ascii(self):
+        for title in ("\u00c4ndere die Fu\u00dfzeile", "\u65e5\u672c\u8a9e", "caf\u00e9 au lait", "a" * 80):
+            name = gitops.branch_name(None, "20261006-120000-abcdef", title)
+            self.assertRegex(name, r"^anton/[a-z0-9-]+$", title)
+            gitops.assert_pushable(name, "main")
+            self.assertLessEqual(len(name), 46)
 
     def test_never_push_base_or_foreign_branch(self):
         with self.assertRaises(RuntimeError):

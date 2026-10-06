@@ -6,6 +6,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 from .config import BRANCH_PREFIX
@@ -58,13 +59,19 @@ def git(args: list[str], cwd: Path | None = None, env: dict | None = None) -> st
     return p.stdout
 
 
-def branch_name(issue: int | None, job_id: str, task: str) -> str:
-    """Unique per job, so a retry never collides with a branch left behind by an earlier run."""
+def ascii_slug(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")
+
+
+def branch_name(issue: int | None, job_id: str, title: str | None = None) -> str:
+    """Always English/ASCII and unique per job, so a retry never collides with an earlier branch.
+    `title` is Claude's English title; without it the name is neutral (`anton/work-<id>`)."""
     suffix = re.sub(r"[^a-z0-9]", "", job_id.lower())[-6:] or "job"
     if issue is not None:
         return f"{BRANCH_PREFIX}issue-{int(issue)}-{suffix}"
-    slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:30].strip("-")
-    return f"{BRANCH_PREFIX}{slug or 'task'}-{suffix}"
+    slug = ascii_slug(title or "")[:30].strip("-")
+    return f"{BRANCH_PREFIX}{slug or 'work'}-{suffix}"
 
 
 def assert_pushable(branch: str, base: str) -> None:

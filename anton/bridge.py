@@ -34,8 +34,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["repo", "task"], "properties": {
          "repo": {"type": "string", "description": "owner/name from anton_list_repos. If only one repo fits "
                                                    "(or the user says 'my website'), use it without asking"},
-         "task": {"type": "string", "description": "The user's request in plain words, plus anything they said "
-                                                   "to leave alone. No file names required"}}}},
+         "task": {"type": "string", "description": "The user's request VERBATIM: their wording, language, "
+                                                   "numbers and quotes exactly as written. Do not paraphrase, "
+                                                   "translate or turn digits into words. No file names needed"}}}},
     {"name": "anton_queue_issue",
      "description": "Implement an existing GitHub issue (Son of Anton). Title and body become the task; only "
                     "issues written by an allowed author are accepted.",

@@ -357,9 +357,41 @@ class RunnerPieceTests(unittest.TestCase):
         self.assertNotIn("@octocat", out)
         self.assertNotIn("#12", out)
         self.assertNotRegex(out, r"#\d")
-        self.assertTrue(all(ln.startswith("> ") for ln in out.splitlines()))
+        self.assertFalse(any(ln.startswith(">") for ln in out.splitlines()))  # plain text, no quote block
         self.assertLessEqual(len(runner.neutralize("x" * 100_000)), runner.SUMMARY_LIMIT + 5)
-        self.assertEqual(runner.neutralize(""), "> (no summary)")
+        self.assertEqual(runner.neutralize(""), "(no summary)")
+
+    def test_titles_are_cut_at_word_boundaries(self):
+        task = "Rename the settings screen title to something shorter and clearer for new users"
+        title = runner.shorten(task, 40)
+        self.assertLessEqual(len(title), 40)
+        self.assertTrue(title.endswith("\u2026"))
+        self.assertTrue(task.startswith(title[:-1].rstrip()))
+        self.assertEqual(runner.shorten("short title", 70), "short title")
+        self.assertEqual(runner.shorten("a   b\n c", 70), "a b c")  # one line
+        self.assertEqual(runner.shorten("x" * 200, 20), "x" * 19 + "\u2026")  # one long word: hard cut
+
+    def test_everything_claude_writes_is_english(self):
+        rules = runner.SYSTEM_RULES
+        self.assertIn("in English", rules)
+        self.assertIn("even if the task is in another language", rules)
+        self.assertIn("TITLE:", rules)
+
+    def test_split_title(self):
+        job = mock.Mock(issue=None)
+        self.assertEqual(runner.split_title("TITLE: Show imprint link\n\nMoved the link.", job),
+                         ("Show imprint link", "Moved the link."))
+        self.assertEqual(runner.split_title("  title:   Fix @bob typo  \nBody", job)[0], "Fix bob typo")
+        self.assertEqual(runner.split_title("TITLE: " + "word " * 40, job)[0][-1], "\u2026")
+        # no TITLE line: a neutral English fallback, never the (possibly foreign-language) task
+        self.assertEqual(runner.split_title("Just a summary", job), ("Apply requested change", "Just a summary"))
+        self.assertEqual(runner.split_title(None, mock.Mock(issue=12)), ("Implement issue #12", ""))
+
+    def test_pr_body_layout(self):
+        body = runner.pr_body(mock.Mock(issue=None), "Changed line 12.", ["- build: passed"], 4)
+        self.assertTrue(body.startswith("## Summary\n\nChanged line 12."))
+        self.assertIn("## Checks (before -> after)\n- build: passed", body)
+        self.assertNotIn("\n>", body)
 
     def test_safe_strips_control_characters(self):
         self.assertEqual(runner.safe("a\nb\x1b[31mc\x00"), "a?b?[31mc?")
@@ -478,6 +510,28 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("5", body["body"])  # check table 6 -> 5
         self.assertFalse(job.work.exists())  # cleaned up
         self.assertEqual(self.tokens, [{"contents": "read"}, {"contents": "write", "pull_requests": "write"}])
+
+    def test_a_german_task_still_produces_english_title_commit_and_branch(self):
+        self.claude = {**self.claude, "result": "TITLE: Raise the experience from 7 to 9 years\n\nChanged the heading."}
+        job, out = self.go(task="Jahreszahl der Erfahrung von 'sieben' auf 'neun' anpassen")
+        self.assertEqual(out.status, "pr-open")
+        _, _, body = self.api_calls[0]
+        self.assertEqual(body["title"], "Anton: Raise the experience from 7 to 9 years")
+        self.assertRegex(body["head"], r"^anton/raise-the-experience-from-7-to?-?[a-z0-9-]*-[a-z0-9]{6}$")
+        self.assertTrue(body["body"].startswith("## Summary\n\nChanged the heading."))
+        commit = next(c for c in self.calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Anton: Raise the experience from 7 to 9 years")
+        for artifact in (body["title"], body["head"], commit[-1], body["body"]):
+            self.assertNotIn("sieben", artifact)
+            self.assertNotIn("Jahreszahl", artifact)
+        self.assertIn(["branch", "-m", body["head"]], self.calls)  # renamed before the push
+        self.assertEqual(self.pushes()[0][-1], f"HEAD:refs/heads/{body['head']}")
+
+    def test_without_a_title_line_the_names_are_neutral_english(self):
+        self.go(task="Ändere die Fußzeile")
+        _, _, body = self.api_calls[0]
+        self.assertEqual(body["title"], "Anton: Apply requested change")
+        self.assertRegex(body["head"], r"^anton/apply-requested-change-[a-z0-9]{6}$")
 
     def test_no_changes_means_no_push(self):
         self.changed = []
