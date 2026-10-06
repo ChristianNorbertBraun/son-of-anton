@@ -50,8 +50,7 @@ TOOLS = [
      "description": "Make a code change in a repo (Son of Anton / Claude Code). Use it for ANY request to "
                     "implement, fix, change or add something in a repository, website or app: you cannot edit "
                     "that code yourself. Anton explores the repo itself, works in a sandbox and opens a DRAFT "
-                    "pull request, so pass the user's request in their own words; file names are NOT needed. "
-                    "Confirm the repo and task with the user first.",
+                    "pull request, so pass the user's request in their own words; file names are NOT needed.",
      "inputSchema": {"type": "object", "required": ["repo", "task"], "properties": {
          "repo": _REPO,
          "task": {"type": "string", "description": "The user's request VERBATIM: their wording, language, "
@@ -59,8 +58,7 @@ TOOLS = [
                                                    "translate or turn digits into words. No file names needed"}}}},
     {"name": "anton_update_pr",
      "description": "Extend an existing pull request (Son of Anton adds a commit to its branch). Works on any "
-                    "open PR of an allowed repo, whoever opened it; never force-pushes. Confirm with the user "
-                    "first.",
+                    "open PR of an allowed repo, whoever opened it; never force-pushes.",
      "inputSchema": {"type": "object", "required": ["repo", "pr", "instruction"], "properties": {
          "repo": _REPO, "pr": {"type": "integer", "minimum": 1},
          "instruction": {"type": "string", "description": "What to add or change, the user's words VERBATIM"}}}},
@@ -70,8 +68,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["repo", "issue"], "properties": {
          "repo": _REPO, "issue": {"type": "integer", "minimum": 1}}}},
     {"name": "anton_create_issue",
-     "description": "Create a GitHub issue in an allowed repo. Write title and body in English. Confirm the "
-                    "text with the user first.",
+     "description": "Create a GitHub issue in an allowed repo. Write title and body in English.",
      "inputSchema": {"type": "object", "required": ["repo", "title", "body"], "properties": {
          "repo": _REPO, "title": {"type": "string", "description": "One line, English"},
          "body": {"type": "string", "description": "Markdown, English. No secrets"}}}},
@@ -83,14 +80,14 @@ TOOLS = [
     {"name": "anton_update_issue",
      "description": "Edit a GitHub issue: change the title, append to the body, replace the body, or close or "
                     "reopen it. Prefer `append`: `body` REPLACES the whole text, so use it only after reading the "
-                    "complete body with anton_get_issue. English. Confirm with the user first.",
+                    "complete body with anton_get_issue. English.",
      "inputSchema": {"type": "object", "required": ["repo", "issue"], "properties": {
          "repo": _REPO, "issue": {"type": "integer", "minimum": 1}, "title": {"type": "string"},
          "append": {"type": "string", "description": "Text added at the end of the body"},
          "body": {"type": "string", "description": "New full body (replaces the old one)"},
          "state": {"type": "string", "enum": ["open", "closed"]}}}},
     {"name": "anton_comment",
-     "description": "Comment on a GitHub issue or pull request. English. Confirm with the user first.",
+     "description": "Comment on a GitHub issue or pull request. English.",
      "inputSchema": {"type": "object", "required": ["repo", "number", "text"], "properties": {
          "repo": _REPO, "number": {"type": "integer", "minimum": 1}, "text": {"type": "string"}}}},
     {"name": "anton_status",

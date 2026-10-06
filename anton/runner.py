@@ -14,7 +14,7 @@ from typing import Callable
 
 from . import checks as chk
 from . import ghapp, gitops, prs, sandbox
-from .config import RepoConfig, Settings, get_repo
+from .config import WEB_TOOLS, RepoConfig, Settings, get_repo
 from .github import GitHub
 from .models import Cancelled, Outcome
 from .proc import run_capped
@@ -107,6 +107,8 @@ def clean_env(with_claude_token: bool = False) -> dict:
         "LANG": "C.UTF-8",
         "npm_config_cache": "/tmp/npm-cache",  # tmpfs inside the sandbox, never shared between jobs
         "npm_config_update_notifier": "false",
+        # whoever types `npm install` (Claude included): no install or lifecycle scripts, ever. `npm run <x>` still works.
+        "npm_config_ignore_scripts": "true",
         "CI": "true",
     }
     if with_claude_token:
@@ -165,8 +167,10 @@ ANSWER_LIMIT = 12_000
 
 def claude_argv(repo: RepoConfig, ask: bool = False) -> list[str]:
     """The prompt is NOT in argv: a task starting with '--' must never be parsed as an option."""
-    tools = ASK_TOOLS if ask else repo.allow_tools
+    web = tuple(t for t in WEB_TOOLS if t in repo.allow_tools)
+    tools = (*ASK_TOOLS, *web) if ask else repo.allow_tools
     deny = (*repo.deny_tools, "Bash", "Edit", "Write", "NotebookEdit") if ask else repo.deny_tools
+    deny = (*deny, *(t for t in WEB_TOOLS if t not in repo.allow_tools))  # web access is opt-in per repo
     return [sandbox.CLAUDE_IN_SANDBOX, "-p", "--output-format", "json", "--model", repo.model,
             "--max-turns", str(min(repo.max_turns, ASK_MAX_TURNS) if ask else repo.max_turns),
             "--append-system-prompt", ASK_RULES if ask else SYSTEM_RULES,

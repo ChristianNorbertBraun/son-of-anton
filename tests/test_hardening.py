@@ -37,8 +37,23 @@ class ConfigHardeningTests(unittest.TestCase):
         self.assertIn("Bash(rm:*)", r.deny_tools)
         self.assertIn("Bash(git:*)", repos().deny_tools)  # even with no deny list at all
 
-    def test_web_tools_are_denied(self):
-        self.assertTrue({"WebFetch", "WebSearch"} <= set(repos().deny_tools))
+    def test_web_tools_are_off_unless_a_repo_allows_them(self):
+        argv = runner.claude_argv(repos())  # no allow list: web is denied
+        denied = argv[argv.index("--disallowedTools") + 1:]
+        self.assertIn("WebSearch", denied)
+        self.assertIn("WebFetch", denied)
+        allowed = runner.claude_argv(repos('allow_tools=["Read", "WebSearch"]'))
+        tools = allowed[allowed.index("--allowedTools") + 1:allowed.index("--disallowedTools")]
+        self.assertIn("WebSearch", tools)
+        denied = allowed[allowed.index("--disallowedTools") + 1:]
+        self.assertNotIn("WebSearch", denied)  # opted in
+        self.assertIn("WebFetch", denied)  # only what was listed is opened
+
+    def test_install_scripts_never_run_even_when_claude_types_npm_install(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(runner, "CONF_DIR", Path(d)):
+            (Path(d) / "claude-token").write_text("tok-abcdefghijklmnop")
+            self.assertEqual(runner.clean_env()["npm_config_ignore_scripts"], "true")
+            self.assertEqual(runner.clean_env(with_claude_token=True)["npm_config_ignore_scripts"], "true")
 
     def test_lists_must_be_lists_of_strings(self):
         for bad in ('protected_paths="deploy/*"', 'deny_tools="Bash(git:*)"', "allow_tools=[1]", 'deny_tools=[""]'):

@@ -18,8 +18,9 @@ DEFAULT_PATH = Path.home() / ".config/son-of-anton/repos.toml"
 DENY_FLOOR = (
     "Bash(git:*)", "Bash(gh:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)",
     "Bash(nc:*)", "Bash(sudo:*)", "Bash(npm run deploy:*)", "Bash(npm publish:*)",
-    "WebFetch", "WebSearch",
 )
+# Off unless a repo lists them in allow_tools (opt-in web research for change and question jobs).
+WEB_TOOLS = ("WebSearch", "WebFetch")
 
 
 class ConfigError(Exception):

@@ -180,9 +180,10 @@ class PoolTests(unittest.TestCase):
 class DaemonConfigTests(unittest.TestCase):
     def test_defaults_and_example(self):
         d = config.parse_daemon({})
-        self.assertEqual((d.max_parallel, d.daily_limit), (2, 10))
+        self.assertEqual((d.max_parallel, d.daily_limit), (2, 10))  # code defaults stay conservative
         ex = config.load_daemon(Path(__file__).parent.parent / "examples/repos.toml")
-        self.assertEqual((ex.max_parallel, ex.daily_limit, ex.poll_seconds), (2, 10, 120))
+        self.assertEqual((ex.max_parallel, ex.daily_limit, ex.poll_seconds), (2, 30, 120))
+        self.assertEqual((ex.bridge_daily_limit, ex.bridge_write_limit, ex.bridge_ask_limit), (30, 100, 100))
 
     def test_limits_are_validated(self):
         for bad in ({"max_parallel": 0}, {"max_parallel": 9}, {"daily_limit": 0}, {"poll_seconds": 5}):

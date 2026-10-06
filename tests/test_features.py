@@ -394,6 +394,24 @@ class AskLifecycleTests(unittest.TestCase):
                          ["Read", "Glob", "Grep"])  # same repo config, question mode: read tools only
         self.assertEqual(int(argv[argv.index("--max-turns") + 1]), min(self.settings.repos["o/r"].max_turns, 20))
 
+    def test_questions_may_use_web_research_only_when_the_repo_allows_it(self):
+        plain = runner.claude_argv(self.settings.repos["o/r"], ask=True)
+        self.assertNotIn("WebSearch", plain[plain.index("--allowedTools") + 1:plain.index("--disallowedTools")])
+        researcher = config.parse_repos(tomllib.loads(
+            '[defaults]\nallow_tools=["Read", "WebSearch", "WebFetch"]\n[repos."o/r"]\ninstallation_id=7\n'))["o/r"]
+        argv = runner.claude_argv(researcher, ask=True)
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+        self.assertEqual(allowed, ["Read", "Glob", "Grep", "WebSearch", "WebFetch"])  # still no Bash, no writes
+        denied = argv[argv.index("--disallowedTools") + 1:]
+        for tool in ("Bash", "Edit", "Write"):
+            self.assertIn(tool, denied)
+
+    def test_the_example_config_allows_dependencies_but_not_install_scripts(self):
+        repo = config.load_repos(Path(__file__).parent.parent / "examples/repos.toml")["your-name/your-site"]
+        self.assertIn("Bash(npm install:*)", repo.allow_tools)
+        self.assertNotIn("package-lock.json", repo.protected_paths)
+        self.assertEqual(runner.clean_env()["npm_config_ignore_scripts"], "true")
+
     def test_the_prompt_is_marked_as_a_question(self):
         job = mock.Mock(task="--version", issue=None, kind="ask", context="", repo=self.settings.repos["o/r"],
                         dir=self.tmp)
