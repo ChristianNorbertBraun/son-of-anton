@@ -26,28 +26,29 @@ MAX_TEXT = 3000
 
 TOOLS = [
     {"name": "anton_create_task",
-     "description": "Queue a coding task for Son of Anton (Claude Code) in an allowlisted GitHub repo. It "
-                    "explores the repository itself, implements the task in a sandbox and opens a DRAFT pull "
-                    "request. Pass the user's request in their own words: file names or technical details are "
-                    "NOT needed. Only call this after the user asked for it and confirmed.",
+     "description": "Make a code change in a repo (Son of Anton / Claude Code). Use it for ANY request to "
+                    "implement, fix, change or add something in a repository, website or app: you cannot edit "
+                    "that code yourself. Anton explores the repo itself, works in a sandbox and opens a DRAFT "
+                    "pull request, so pass the user's request in their own words; file names are NOT needed. "
+                    "Confirm the repo and task with the user first.",
      "inputSchema": {"type": "object", "required": ["repo", "task"], "properties": {
          "repo": {"type": "string", "description": "owner/name from anton_list_repos. If only one repo fits "
                                                    "(or the user says 'my website'), use it without asking"},
          "task": {"type": "string", "description": "The user's request in plain words, plus anything they said "
                                                    "to leave alone. No file names required"}}}},
     {"name": "anton_queue_issue",
-     "description": "Queue an existing GitHub issue (title and body become the task). Only issues written "
-                    "by an allowed author are accepted.",
+     "description": "Implement an existing GitHub issue (Son of Anton). Title and body become the task; only "
+                    "issues written by an allowed author are accepted.",
      "inputSchema": {"type": "object", "required": ["repo", "issue"], "properties": {
          "repo": {"type": "string"}, "issue": {"type": "integer", "minimum": 1}}}},
     {"name": "anton_status",
-     "description": "Show running and queued jobs, or one job by id, and the daily budget.",
+     "description": "Show Son of Anton jobs and budget. Lists running and queued jobs, or one job by id.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}}},
     {"name": "anton_cancel",
-     "description": "Cancel a queued or running job by id.",
+     "description": "Cancel a Son of Anton job. Works on a queued or running job by id.",
      "inputSchema": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
     {"name": "anton_list_repos",
-     "description": "List the repositories Son of Anton may work on.",
+     "description": "List repos Son of Anton may change. Call this first to pick the repo yourself.",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
