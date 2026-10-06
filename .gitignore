@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+# secrets and local state must never be committed
+*.pem
+*.key
+.env
+.env.*
+claude-token
+repos.toml
+!examples/repos.toml
+*.db
+*.db-wal
+*.db-shm
+jobs/
+.DS_Store
