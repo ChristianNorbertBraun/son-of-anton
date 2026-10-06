@@ -200,6 +200,12 @@ class Queue:
         with self._conn() as c:
             return [_row(r) for r in c.execute(sql + "ORDER BY created DESC, rowid DESC LIMIT ?", (limit,))]
 
+    def used_by(self, requester: str) -> int:
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) FROM jobs WHERE requested_by=? AND created>=? "
+                             "AND (status!='cancelled' OR started IS NOT NULL)",
+                             (requester, self._now() - DAY)).fetchone()[0]
+
     def used_today(self) -> int:
         with self._conn() as c:
             return self._used(c)

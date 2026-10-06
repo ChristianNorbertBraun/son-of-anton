@@ -66,6 +66,8 @@ class DaemonConfig:
     daily_limit: int = 10  # jobs per rolling 24h, protects the Claude subscription limit
     max_queued: int = 20  # waiting jobs; bounds queue growth
     poll_seconds: int = 120
+    bridge_port: int = 8765  # MCP endpoint for the chat agent, 127.0.0.1 only
+    bridge_daily_limit: int = 5  # jobs the chat agent may start per rolling 24h (it can be prompt-injected)
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,8 @@ def parse_daemon(data: dict) -> DaemonConfig:
         daily_limit=_int(d.get("daily_limit", 10), "daemon.daily_limit", 1, 1000),
         max_queued=_int(d.get("max_queued", 20), "daemon.max_queued", 1, 200),
         poll_seconds=_int(d.get("poll_seconds", 120), "daemon.poll_seconds", 30, 86400),
+        bridge_port=_int(d.get("bridge_port", 8765), "daemon.bridge_port", 1024, 65535),
+        bridge_daily_limit=_int(d.get("bridge_daily_limit", 5), "daemon.bridge_daily_limit", 1, 100),
     )
     return cfg
 

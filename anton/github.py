@@ -38,6 +38,9 @@ class GitHub:
     def issues(self, label: str) -> list[dict]:
         return self._call("GET", f"/issues?labels={quote(label, safe='')}&state=open&per_page=30&sort=updated")
 
+    def issue(self, number: int) -> dict:
+        return self._call("GET", f"/issues/{int(number)}")
+
     def events(self, number: int) -> list[dict]:
         out: list[dict] = []
         for page in range(1, 6):  # oldest first; 500 events is far more than any normal issue

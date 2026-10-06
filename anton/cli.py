@@ -10,13 +10,14 @@ import sys
 import threading
 from pathlib import Path
 
-from . import config, poller, runner
+from . import bridge, config, poller, runner
 from .events import Dispatcher
 from .github import GitHub
 from .pool import Pool
 from .queue import InputError, LimitError, Queue
 from .runner import safe
 from .service import Service
+from .telegram import TelegramNotifier
 
 STATE_DIR = Path.home() / ".local/state/son-of-anton"
 DB_PATH = STATE_DIR / "queue.db"
@@ -91,12 +92,12 @@ def cmd_serve(a: argparse.Namespace) -> int:
     print(f"anton serve: max_parallel={settings.daemon.max_parallel} daily_limit={settings.daemon.daily_limit} "
           f"dry_run={dry} recovered_failed={failed} gc_removed={removed}", flush=True)
     gh_for = github_factory(settings)
-    svc = Service(q, settings.repos)
+    svc = Service(q, settings.repos, requester_limits={bridge.REQUESTER: settings.daemon.bridge_daily_limit})
 
     def log_event(ev, row):
         print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True)
 
-    dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for)])
+    dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for), TelegramNotifier()])
     pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry), settings.daemon.max_parallel,
                 on_event=dispatcher.emit)
     stop = threading.Event()
@@ -107,7 +108,17 @@ def cmd_serve(a: argparse.Namespace) -> int:
         print(f"anton serve: polling labels on {', '.join(polling)} every {settings.daemon.poll_seconds}s", flush=True)
         threading.Thread(target=poller.poll_forever, args=(settings, svc, gh_for, stop), name="poller",
                          daemon=True).start()
+    server = None
+    try:
+        token = (runner.CONF_DIR / "bridge-token").read_text().strip()
+    except OSError:
+        token = ""
+    if len(token) >= 32:  # the chat bridge is opt-in: no token file, no endpoint
+        server = bridge.serve(bridge.Bridge(settings, svc, gh_for), token, settings.daemon.bridge_port)
+        print(f"anton serve: chat bridge on 127.0.0.1:{settings.daemon.bridge_port}", flush=True)
     pool.run_forever(stop)
+    if server:
+        server.shutdown()
     print("anton serve: stopping, waiting for running jobs", flush=True)
     left = pool.drain(timeout=60)
     dispatcher.stop()

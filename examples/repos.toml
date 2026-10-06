@@ -11,6 +11,8 @@ bot_id = 123456789               # numeric id of that bot user (GET /users/<bot_
 max_parallel = 2     # hard cap is 4
 daily_limit = 10     # jobs per rolling 24h (protects the Claude subscription limit)
 poll_seconds = 120   # GitHub label poller
+bridge_port = 8765          # MCP endpoint for a chat agent, 127.0.0.1 only; needs ~/.config/son-of-anton/bridge-token
+bridge_daily_limit = 5      # jobs the chat agent may start per 24h (it can be prompt-injected)
 
 [defaults]
 model = "claude-opus-5-5"

@@ -40,7 +40,9 @@ Good tasks are concrete and small, and say what to leave alone. Vague ones ("imp
 
 Give a repo `allowed_authors = ["your-login"]` in the config and the daemon polls it. Put the label `anton` on an issue and it becomes a job (title and body are the task). A job starts only if **both** the issue's author **and** the user who set the label are in `allowed_authors`; everything else is ignored silently, and issue comments are never read. The label then moves through `anton:queued` → `anton:running` → `anton:pr` (with a comment linking the draft PR) or `anton:failed`. To retry, put `anton` on it again. `anton poll --once` checks right now instead of waiting.
 
-A chat bridge is planned and will create jobs through the same submit path.
+### From a chat agent (MCP)
+
+If `~/.config/son-of-anton/bridge-token` exists, `anton serve` also opens an MCP endpoint on `127.0.0.1:8765` (bearer token, loopback only) with the tools `anton_create_task`, `anton_queue_issue`, `anton_status`, `anton_cancel` and `anton_list_repos`. They use the same submit path as everything else, plus a smaller daily quota for the chat agent (`bridge_daily_limit`), because it can be prompt-injected. Put `telegram-token` and `telegram-chat` next to it to get a message when a job starts or ends.
 
 ## Setup
 
