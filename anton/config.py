@@ -75,10 +75,17 @@ class DaemonConfig:
 
 
 @dataclass(frozen=True)
+class UpdateConfig:
+    repo: str       # where releases come from, e.g. you/son-of-anton
+    publisher: str  # only releases published by this GitHub login are installed
+
+
+@dataclass(frozen=True)
 class Settings:
     github: GithubConfig
     daemon: DaemonConfig
     repos: dict[str, RepoConfig]
+    update: UpdateConfig | None = None  # no [update] section: `anton update` is off
 
 
 def _int(value, where: str, lo: int, hi: int) -> int:
@@ -221,8 +228,25 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
     return repos
 
 
+PUBLISHER_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+
+
+def parse_update(data: dict) -> UpdateConfig | None:
+    u = data.get("update")
+    if u is None:
+        return None
+    if not isinstance(u, dict):
+        raise ConfigError("update: must be a table")
+    repo, publisher = u.get("repo"), u.get("publisher")
+    if not (isinstance(repo, str) and SLUG_RE.fullmatch(repo)):
+        raise ConfigError("update.repo: must look like owner/name")
+    if not (isinstance(publisher, str) and PUBLISHER_RE.fullmatch(publisher)):
+        raise ConfigError("update.publisher: must be a GitHub login")
+    return UpdateConfig(repo, publisher)
+
+
 def parse_settings(data: dict) -> Settings:
-    return Settings(parse_github(data), parse_daemon(data), parse_repos(data))
+    return Settings(parse_github(data), parse_daemon(data), parse_repos(data), parse_update(data))
 
 
 def _load(path: Path) -> dict:

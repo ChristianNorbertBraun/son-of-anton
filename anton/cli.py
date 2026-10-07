@@ -1,4 +1,4 @@
-"""anton run | enqueue | queue | cancel | serve | jobs | selftest"""
+"""anton run | enqueue | ask | queue | cancel | serve | poll | patch | update | version | jobs | selftest"""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import bridge, config, poller, runner
+from . import bridge, config, poller, runner, updater
 from .events import Dispatcher
 from .github import GitHub
 from .pool import Pool
@@ -18,6 +18,7 @@ from .queue import InputError, LimitError, Queue
 from .runner import safe
 from .service import Service
 from .telegram import TelegramNotifier
+from .version import __version__
 
 STATE_DIR = Path.home() / ".local/state/son-of-anton"
 DB_PATH = STATE_DIR / "queue.db"
@@ -143,9 +144,10 @@ def cmd_serve(a: argparse.Namespace) -> int:
     def log_event(ev, row):
         print(f"{ev}: {row.id} {row.repo} -> {row.status}", flush=True)
 
+    updater.mark_running()
     dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for), TelegramNotifier()])
     pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry), settings.daemon.max_parallel,
-                on_event=dispatcher.emit)
+                on_event=dispatcher.emit, paused=updater.paused)
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
@@ -197,6 +199,48 @@ def cmd_patch(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_version(_: argparse.Namespace) -> int:
+    print(__version__)
+    return 0
+
+
+def cmd_config_check(_: argparse.Namespace) -> int:
+    """Load the real config with this code. The updater runs it with the NEW code before switching to it."""
+    s = config.load_settings()
+    print(f"ok: version {__version__}, {len(s.repos)} repos")
+    return 0
+
+
+def cmd_update(a: argparse.Namespace) -> int:
+    """Install the newest release published by you on GitHub (see [update] in the config)."""
+    from . import telegram
+    settings = config.load_settings()
+    cfg = settings.update
+    if cfg is None:
+        print("update is off: add an [update] section (repo, publisher) to the config", file=sys.stderr)
+        return 2
+    try:
+        release = updater.find_release(cfg, to=a.to)
+    except updater.UpdateRefused as e:
+        print(f"no update: {e}", file=sys.stderr)
+        return 1
+    newer = updater.is_newer(release)
+    print(f"installed {__version__}, release {release.tag}{' (newer)' if newer else ''}")
+    if a.check:
+        print(safe(release.notes, 500) if newer else "")
+        return 0
+    if not (newer or a.force):
+        print("nothing to do")
+        return 0
+    if not a.yes and input(f"install {release.tag}? [y/N] ").strip().lower() != "y":
+        return 1
+    q = open_queue(settings)
+    deps = updater.Deps(running_jobs=lambda: sum(1 for r in q.list(active_only=True) if r.status == "running"),
+                        notify=telegram.notify)
+    res = updater.update(cfg, updater.Layout(), deps, to=a.to, force=a.force, wait_seconds=a.wait * 60)
+    return 0 if res.status in ("updated", "current") else 1
+
+
 def cmd_jobs(_: argparse.Namespace) -> int:
     for p in sorted(runner.JOBS_DIR.glob("*/job.json")):
         d = json.loads(p.read_text())
@@ -245,6 +289,15 @@ def main(argv: list[str] | None = None) -> int:
     pa = sub.add_parser("patch", help="print the patch of a proposed change")
     pa.add_argument("id")
     pa.set_defaults(fn=cmd_patch)
+    sub.add_parser("version", help="print the version").set_defaults(fn=cmd_version)
+    sub.add_parser("config-check", help="load the config and exit").set_defaults(fn=cmd_config_check)
+    up = sub.add_parser("update", help="install the newest release")
+    up.add_argument("--check", action="store_true", help="only show what is available")
+    up.add_argument("--to", help="a specific release, e.g. v0.2.0")
+    up.add_argument("--force", action="store_true", help="also reinstall the same or an older version")
+    up.add_argument("--yes", action="store_true", help="do not ask")
+    up.add_argument("--wait", type=int, default=30, help="minutes to wait for running jobs")
+    up.set_defaults(fn=cmd_update)
     j = sub.add_parser("jobs", help="list job directories")
     j.set_defaults(fn=cmd_jobs)
     st = sub.add_parser("selftest", help="try to escape the sandbox (must pass before untrusted input)")

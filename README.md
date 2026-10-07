@@ -11,7 +11,7 @@ Task → queue → fresh clone → Claude Code implements it in a sandbox → ch
 - **Sandbox:** `npm`, your checks and Claude run in [bubblewrap](https://github.com/containers/bubblewrap): system read-only, checkout at `/work` (`.git` read-only), no access to keys or tokens.
 - **Claude** runs headless (`claude -p`, the task goes in on stdin) with a tool allow/deny list and turn and time limits. It cannot run git, gh, curl or deploy commands. Installing dependencies (`npm install`) and web research (`WebSearch`, `WebFetch`) are opt-in per repo through `allow_tools`; install scripts never run, whoever types `npm install`.
 - **The runner, not Claude,** commits and pushes an `anton/*` branch, using a short-lived GitHub App token scoped to that one repo.
-- **Gates:** `gate` checks must pass, `regression` checks must not get worse. A change to protected paths (CI workflows, `.env`, keys, ...) is never pushed: it comes back as a **patch** instead (see below). Symlinks and nested repositories fail the job.
+- **Gates:** `gate` checks must pass, `regression` checks must not get worse. A change that contains a stored secret or the shape of a token or private key is refused before anything leaves the machine. A change to protected paths (CI workflows, `.env`, keys, ...) is never pushed: it comes back as a **patch** instead (see below). Symlinks and nested repositories fail the job.
 - **Queue:** SQLite, limited parallelism, daily limits, no duplicate jobs per issue or PR.
 - **English artifacts:** Claude starts its answer with `TITLE: <imperative English title>` and writes code, comments and the summary in English, whatever language the task is in. The runner derives the commit message, the PR title and the (ASCII) branch name from that title.
 
@@ -61,6 +61,7 @@ If `~/.config/son-of-anton/bridge-token` exists (one token file per chat client,
 - **Change code**: `anton_create_task` (new draft PR), `anton_update_pr` (add a commit to any open PR of an allowed repo, no force push, never the default or a protected branch, no forks), `anton_queue_issue`.
 - **Issues**: `anton_create_issue`, `anton_get_issue`, `anton_update_issue` (prefer `append`), `anton_comment`. Texts are published without @-mentions and closing keywords, and what you read from GitHub is handed to the agent marked as untrusted data.
 - `anton_status`, `anton_cancel`, `anton_list_repos`.
+- **Self-update**: `anton_update_check` (read-only) and `anton_update_apply` (only when you ask for it).
 
 They use the same submit path as everything else, plus smaller per-client quotas (`bridge_daily_limit` jobs, `bridge_write_limit` GitHub writes, `bridge_ask_limit` questions), because a chat agent can be prompt-injected. Put `telegram-token` and `telegram-chat` next to it to get a message when a job starts or ends.
 
@@ -70,6 +71,17 @@ They use the same submit path as everything else, plus smaller per-client quotas
 2. Claude Code for that user and a token from `claude setup-token`.
 3. A GitHub App (webhook off; Contents, Issues, Pull requests = write; no Workflows), installed only on allowed repos. Key in `~/.config/son-of-anton/app-key.pem` (mode 600).
 4. `examples/repos.toml` → `~/.config/son-of-anton/repos.toml`, fill in your values. Only `github.com` is accepted. Per repo: `checks` (`gate` must pass, `regression` must not get worse; `metric` or `metric_lines` count the problems), `protected_paths`, `allow_tools` / `deny_tools` (a mandatory deny floor can only be extended), `allowed_authors` and `trigger_label` for the issue trigger, and the `[daemon]` limits.
+
+## Updating
+
+Son of Anton can update itself from its own releases, so you can improve it with itself. You publish a release on GitHub (UI or CLI) with a tag `vX.Y.Z` whose `anton/version.py` says the same; then `anton update` (or "update yourself" in the chat, via `anton_update_apply`) installs it:
+
+1. Only a release published **by the login in `[update] publisher`**, no draft, no pre-release and newer than the running version is accepted (no downgrades without `--force`). Nothing Anton or the chat agents do can publish one; to be sure, restrict tag creation of `v*` to yourself in a GitHub ruleset.
+2. The source archive is unpacked next to the old version (`~/releases/<version>`, plain files only, no links or `..`). Its own tests run in the sandbox and it must be able to read your real config (`anton config-check`).
+3. Running jobs finish first (no new job starts meanwhile, queued ones wait). Then `~/current` points to the new version in one step, the service restarts and must report the new version and stay up for 15 seconds.
+4. If that fails the symlink goes back and the old version is started again. A Telegram message says what happened. Three versions are kept.
+
+`~/bin/anton` and the service run `~/current`. Merging a PR never changes the running installation; only a release you publish and an update you ask for do. Add `[update]` to the config to turn it on (see `examples/repos.toml`).
 
 ## Commands
 
@@ -82,6 +94,8 @@ anton poll --once                       # check GitHub for labelled issues now
 anton serve                             # run the worker pool
 anton cancel <job-id>
 anton patch <job-id> > anton.patch       # the patch of a `proposed` job
+anton update [--check]                  # install the newest release (see Updating)
+anton version
 anton run --repo o/r --task "..." [--dry-run]   # one job now, no queue
 ```
 

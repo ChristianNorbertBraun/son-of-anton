@@ -16,8 +16,9 @@ EventFn = Callable[[str, JobRow], None]
 
 
 class Pool:
-    def __init__(self, queue: Queue, run_fn: RunFn, max_parallel: int, on_event: EventFn | None = None):
-        self.queue, self.run_fn, self.max_parallel = queue, run_fn, max_parallel
+    def __init__(self, queue: Queue, run_fn: RunFn, max_parallel: int, on_event: EventFn | None = None,
+                 paused: Callable[[], bool] = lambda: False):
+        self.queue, self.run_fn, self.max_parallel, self.paused = queue, run_fn, max_parallel, paused
         self.on_event = on_event or (lambda event, row: None)
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
@@ -26,6 +27,8 @@ class Pool:
     def tick(self) -> int:
         """Start as many queued jobs as capacity allows. Returns how many were started."""
         started = 0
+        if self.paused():  # an update waits for the running jobs: queued jobs stay queued
+            return 0
         while not self._stopping and (row := self.queue.claim_next(self.max_parallel)) is not None:
             t = threading.Thread(target=self._work, args=(row,), name=f"job-{row.id}", daemon=True)
             with self._lock:

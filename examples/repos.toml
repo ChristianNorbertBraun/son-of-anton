@@ -7,6 +7,10 @@ app_id = 123456                  # your GitHub App id (not secret; the private k
 bot_name = "my-anton-app[bot]"   # the app's bot user, used as git author
 bot_id = 123456789               # numeric id of that bot user (GET /users/<bot_name>)
 
+[update]                          # optional: lets `anton update` install your releases
+repo = "your-name/son-of-anton"   # where the releases are
+publisher = "your-github-login"   # only releases published by this login are installed
+
 [daemon]
 max_parallel = 2     # hard cap is 4
 daily_limit = 30     # code-change jobs per rolling 24h (the real limit is your Claude subscription)

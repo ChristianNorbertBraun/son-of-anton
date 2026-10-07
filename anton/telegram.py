@@ -76,6 +76,16 @@ def _send(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("telegram send failed: network error") from None
 
 
+def notify(text: str, conf_dir: Path | None = None) -> None:
+    """One plain message to the configured chat, for things that are not jobs (an update). Never raises."""
+    try:
+        creds = TelegramNotifier(conf_dir)._creds()
+        if creds and creds[0] and creds[1]:
+            _send(creds[0], creds[1], safe(text, 3500))
+    except Exception:
+        pass
+
+
 class TelegramNotifier:
     def __init__(self, conf_dir: Path | None = None, send: Callable[[str, str, str], None] = _send,
                  send_file: Callable[[str, str, str, str], None] = _send_file):
