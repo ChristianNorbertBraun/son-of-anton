@@ -58,3 +58,21 @@ cmd = "npm run lint"
 kind = "regression"
 metric = 'Code style issues found in (\d+) files?'
 metric_lines = '^\[warn\] (?!Code style)'   # prettier says "the above file" for one file: count the [warn] lines
+
+# Son of Anton can work on itself. The security core only ever comes back as a PATCH for you to apply
+# (protected_paths), a merge changes nothing on the Pi until you update it, and the runner refuses any
+# change that contains a stored secret or the shape of a token or key. No npm here, so no `install`.
+[repos."your-name/son-of-anton"]
+installation_id = 12345678
+base = "main"
+allow_tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 -m unittest:*)",
+               "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "WebSearch", "WebFetch"]
+protected_paths = ["anton/sandbox.py", "anton/config.py", "anton/gitops.py", "anton/ghapp.py",
+                   "anton/runner.py", "anton/selftest.py", "anton/tripwire.py"]
+allowed_authors = ["your-github-login"]
+trigger_label = "anton"
+
+[[repos."your-name/son-of-anton".checks]]
+name = "tests"
+cmd = "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests"
+kind = "gate"

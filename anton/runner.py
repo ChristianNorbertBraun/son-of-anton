@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import checks as chk
-from . import ghapp, gitops, prs, sandbox
+from . import ghapp, gitops, prs, sandbox, tripwire
 from .config import WEB_TOOLS, RepoConfig, Settings, get_repo
 from .github import GitHub
 from .models import Cancelled, Outcome
@@ -329,8 +329,13 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
     if problems:
         job.state("failed", reason="blocked changes", paths=problems)
         return Outcome("failed", reason=safe("blocked changes: " + ", ".join(problems[:5])))
+    patch = gitops.staged_patch(job.work)
+    leaks = tripwire.scan(patch, tripwire.secret_values(CONF_DIR))
+    if leaks:  # nothing that looks like a token or key leaves this machine, in a PR or in a patch
+        job.state("failed", reason="secret in change", findings=leaks)
+        return Outcome("failed", reason=safe("blocked: " + ", ".join(leaks[:5])))
     title, summary = split_title(result.get("result", ""), job)
-    patch = gitops.staged_patch(job.work) if protected else None  # protected paths are never pushed
+    patch = patch if protected else None  # protected paths are never pushed
     if pr_info is None and patch is None:
         final_branch = gitops.branch_name(job.issue, job.id, title)  # English title -> English branch
         gitops.assert_pushable(final_branch, repo.base)

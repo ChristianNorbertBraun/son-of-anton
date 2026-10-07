@@ -602,6 +602,19 @@ class LifecycleTests(unittest.TestCase):
         self.problems, self.protected = ["link (symlink)"], [".github/x.yml"]
         self.assertEqual(self.go()[1].status, "failed")
 
+    def test_a_secret_in_the_change_fails_the_job_in_a_pr_and_in_a_patch(self):
+        leaked = "diff --git a/src/a.js b/src/a.js\n+++ b/src/a.js\n+const k = 'sk-ant-oat01-" + "A" * 30 + "'\n"
+        for protected in ([], [".github/x.yml"]):
+            with self.subTest(protected=protected):
+                self.protected = protected
+                runner.gitops.staged_patch.side_effect = lambda cwd: leaked
+                _, out = self.go()
+                self.assertEqual(out.status, "failed")
+                self.assertIn("Claude token in src/a.js", out.reason)
+                self.assertNotIn("AAAAAAAA", out.reason)
+                self.assertEqual(self.pushes(), [])
+                self.assertEqual(self.api_calls, [])
+
     def test_worse_checks_fail_the_job(self):
         self.checks[1]["check"] = result("check", "regression", 1, 9)
         _, out = self.go()
