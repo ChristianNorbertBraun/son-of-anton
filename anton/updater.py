@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -99,11 +100,20 @@ def mark_running(layout: Layout | None = None) -> None:
 
 # ---- finding and checking a release -------------------------------------------------------------
 
-def _get(url: str, limit: int) -> bytes:
+def _get(url: str, limit: int, attempts: int = 3, sleep: Callable[[float], None] = time.sleep) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "son-of-anton-updater",
                                                "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = r.read(limit + 1)
+    for attempt in range(attempts):  # a Pi on wifi drops a lookup now and then
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(limit + 1)
+            break
+        except urllib.error.HTTPError:
+            raise  # 404, 403: retrying does not help
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            sleep(2 * (attempt + 1))
     if len(data) > limit:
         raise UpdateRefused("download is too large")
     return data
@@ -138,7 +148,7 @@ def find_release(cfg: UpdateConfig, fetch: Callable[[str], dict] = get_json, to:
     try:
         return release_from_api(fetch(f"https://api.github.com/repos/{cfg.repo}/{path}"), cfg)
     except (OSError, ValueError) as e:  # no network, 404 (no release yet), bad JSON
-        raise UpdateRefused(f"could not read the release: {type(e).__name__}") from None
+        raise UpdateRefused(f"could not read the release: {type(e).__name__}: {str(e)[:100]}") from None
 
 
 def is_newer(release: Release, installed: str = __version__) -> bool:
@@ -349,6 +359,7 @@ def update(cfg: UpdateConfig, layout: Layout, deps: Deps, to: str | None = None,
                 except UpdateRefused:
                     pass
                 back = deps.healthy(previous, layout)
+                shutil.rmtree(target, ignore_errors=True)  # the release that did not work is not kept
                 return done("rolled-back", f"{release.name} failed its health check; went back to {previous}"
                             + ("" if back else " (and that one did not come up either: check the service!)"))
             return done("failed", f"{release.name} failed its health check and there is no previous version to go back to")

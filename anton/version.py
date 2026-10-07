@@ -1,7 +1,7 @@
 """The version of this code. A release is a tag `vX.Y.Z` whose anton/version.py says the same."""
 import re
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 TAG_RE = re.compile(r"v(\d{1,4})\.(\d{1,4})\.(\d{1,4})")
 
 

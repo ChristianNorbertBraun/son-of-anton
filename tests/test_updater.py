@@ -171,6 +171,7 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertEqual(res.status, "rolled-back")
         self.assertEqual(updater.current_name(self.layout), "0.1.0")
         self.assertEqual(self.restarts, ["0.2.0", "0.1.0"])
+        self.assertFalse((self.layout.releases / "0.2.0").exists())  # the failed release is removed again
         self.assertIn("went back to 0.1.0", self.notes[-1])
         self.assertFalse(self.layout.pause.exists())
 
@@ -258,6 +259,18 @@ class SmallPartsTests(unittest.TestCase):
             with mock.patch.object(updater, "systemctl", mock.Mock(return_value=mock.Mock(stdout="activating\n"))):
                 clock["t"] = 0.0
                 self.assertFalse(updater.healthy("0.2.0", layout, timeout=30, sleep=sleep, clock=lambda: clock["t"]))
+
+    def test_downloads_retry_dropped_connections_but_not_http_errors(self):
+        import urllib.error
+        ok = mock.MagicMock()
+        ok.__enter__.return_value.read.return_value = b"data"
+        with mock.patch("urllib.request.urlopen", side_effect=[OSError("dns"), OSError("dns"), ok]) as op:
+            self.assertEqual(updater._get("https://x", 100, sleep=lambda s: None), b"data")
+            self.assertEqual(op.call_count, 3)
+        err = urllib.error.HTTPError("https://x", 404, "nf", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=err) as op, self.assertRaises(urllib.error.HTTPError):
+            updater._get("https://x", 100, sleep=lambda s: None)
+        self.assertEqual(op.call_count, 1)
 
     def test_restart_clears_a_start_limit_failure_before_restarting(self):
         calls = []
