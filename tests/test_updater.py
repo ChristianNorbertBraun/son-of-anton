@@ -259,6 +259,16 @@ class SmallPartsTests(unittest.TestCase):
                 clock["t"] = 0.0
                 self.assertFalse(updater.healthy("0.2.0", layout, timeout=30, sleep=sleep, clock=lambda: clock["t"]))
 
+    def test_restart_clears_a_start_limit_failure_before_restarting(self):
+        calls = []
+        ok = mock.Mock(returncode=0, stderr="")
+        with mock.patch.object(updater, "systemctl", side_effect=lambda *a: calls.append(a) or ok):
+            updater.restart()
+        self.assertEqual(calls, [("reset-failed", "anton.service"), ("restart", "anton.service")])
+        with mock.patch.object(updater, "systemctl", return_value=mock.Mock(returncode=1, stderr="Start request repeated too quickly")):
+            with self.assertRaises(UpdateRefused):
+                updater.restart()
+
     def test_update_section_of_the_config(self):
         self.assertIsNone(config.parse_update({}))
         self.assertEqual(config.parse_update({"update": {"repo": "o/r", "publisher": "me"}}), UpdateConfig("o/r", "me"))

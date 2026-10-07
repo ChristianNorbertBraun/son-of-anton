@@ -227,7 +227,7 @@ def cmd_update(a: argparse.Namespace) -> int:
     newer = updater.is_newer(release)
     print(f"installed {__version__}, release {release.tag}{' (newer)' if newer else ''}")
     if a.check:
-        print(safe(release.notes, 500) if newer else "")
+        print(safe(release.notes, 500) if newer else "up to date")
         return 0
     if not (newer or a.force):
         print("nothing to do")

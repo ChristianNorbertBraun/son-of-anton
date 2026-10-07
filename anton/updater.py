@@ -241,6 +241,7 @@ def systemctl(*args: str) -> subprocess.CompletedProcess:
 
 
 def restart() -> None:
+    systemctl("reset-failed", SERVICE)  # a crash-looping release can leave the unit in start-limit-hit: clear it first
     p = systemctl("restart", SERVICE)
     if p.returncode != 0:
         raise UpdateRefused(f"could not restart the service: {p.stderr.strip()[:150]}")
