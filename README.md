@@ -103,9 +103,9 @@ Tests: `python3 -m unittest discover -s tests`
 
 ## Limits
 
-- The network stays open, so a manipulated agent could send the Claude token out, and the sandbox can reach loopback and LAN services. Use a dedicated machine and add an egress rule for the runner user. `anton selftest` reports this as a known gap.
+- The sandbox shares the network of the runner user, so a manipulated agent could still send the Claude token to the internet. Keep it away from your own network with an egress rule for that user (`examples/anton-egress.nft`: no loopback, LAN or tailnet, DNS allowed); without it `anton selftest` reports a known gap.
 - You review every PR; a merge is only as safe as that review. Look at dependency changes in particular: a new package is run by your CI at merge time.
-- No egress filter, no fork mode. Check the current terms before using a subscription for unattended automation.
+- No filter for internet destinations, no fork mode. Check the current terms before using a subscription for unattended automation.
 
 ## License
 

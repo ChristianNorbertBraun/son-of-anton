@@ -1,0 +1,14 @@
+# The sandbox shares the network of user anton (uid 1004). Keep it away from everything private.
+table inet anton_egress
+delete table inet anton_egress
+table inet anton_egress {
+  chain out {
+    type filter hook output priority 0; policy accept;
+    meta skuid != 1004 accept
+    ct state established,related accept
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport 53 accept
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 53 accept
+    ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10 } drop
+    ip6 daddr { ::1, fc00::/7, fe80::/10 } drop
+  }
+}
