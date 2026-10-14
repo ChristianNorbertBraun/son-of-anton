@@ -1,4 +1,3 @@
-import http.client
 import json
 import tempfile
 import tomllib
@@ -10,6 +9,8 @@ from anton import bridge, config
 from anton.queue import Queue
 from anton.service import Service
 from anton.telegram import TelegramNotifier, format_event
+
+import fake_http
 
 CONF = (
     '[github]\napp_id=1\nbot_name="b[bot]"\nbot_id=2\n[daemon]\nbridge_daily_limit=2\n'
@@ -164,32 +165,28 @@ class BridgeTests(unittest.TestCase):
 
 
 class HttpTests(unittest.TestCase):
+    """The HTTP guards, exercised on the handler directly (see fake_http)."""
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         settings = config.parse_settings(tomllib.loads(CONF))
         queue = Queue(Path(cls.tmp.name) / "q.db", daily_limit=10)
         b = bridge.Bridge(settings, Service(queue, settings.repos), lambda r: None)
-        cls.server = bridge.serve(b, TOKEN, 0)  # port 0: the OS picks a free one
-        cls.port = cls.server.server_address[1]
+        cls.handler = bridge.make_handler(b, {"merlin": TOKEN})
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
         cls.tmp.cleanup()
 
     def post(self, body, headers=None, path="/mcp", method="POST"):
-        h = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json", **(headers or {})}
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request(method, path, body if isinstance(body, (bytes, type(None))) else json.dumps(body), h)
-        resp = conn.getresponse()
-        data = resp.read()
-        conn.close()
-        return resp.status, data
+        h = {"Authorization": f"Bearer {TOKEN}", **(headers or {})}
+        return fake_http.request(self.handler, method, path, body, h)
 
     def test_server_listens_on_loopback_only(self):
-        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        with mock.patch.object(bridge, "ThreadingHTTPServer") as server, mock.patch.object(bridge.threading, "Thread"):
+            bridge.serve(mock.Mock(), TOKEN, 8765)
+        self.assertEqual(server.call_args.args[0], ("127.0.0.1", 8765))
 
     def test_valid_request(self):
         status, body = self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

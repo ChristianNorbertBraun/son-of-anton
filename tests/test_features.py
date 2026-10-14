@@ -1,5 +1,4 @@
 """Tests for: extending existing pull requests, issue tools, read-only questions, per-client tokens."""
-import http.client
 import json
 import sqlite3
 import tempfile
@@ -17,6 +16,8 @@ from anton.prs import PrRefused
 from anton.queue import FINAL, InputError, LimitError, Queue
 from anton.service import Service
 from anton.telegram import format_event
+
+import fake_http
 
 CONF = (
     '[github]\napp_id=1\nbot_name="the-bot[bot]"\nbot_id=2\n'
@@ -647,24 +648,16 @@ class ClientTokenTests(unittest.TestCase):
         queue = Queue(Path(cls.tmp.name) / "q.db", daily_limit=10)
         svc = Service(queue, s.repos, requester_limits={"merlin": 1, "anton": 1})
         cls.queue, cls.svc = queue, svc
-        cls.server = bridge.serve(bridge.Bridge(s, svc, lambda r: None), cls.TOKENS, 0)
-        cls.port = cls.server.server_address[1]
+        cls.handler = bridge.make_handler(bridge.Bridge(s, svc, lambda r: None), cls.TOKENS)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
         cls.tmp.cleanup()
 
     def rpc(self, token, name="anton_create_task", args=None):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": name, "arguments": args or {"repo": "o/r", "task": "t"}}}
-        conn.request("POST", "/mcp", json.dumps(body), {"Authorization": f"Bearer {token}"})
-        r = conn.getresponse()
-        data = r.read()
-        conn.close()
-        return r.status, data
+        return fake_http.request(self.handler, body=body, headers={"Authorization": f"Bearer {token}"})
 
     def test_every_client_is_named_by_its_token_and_has_its_own_quota(self):
         self.assertEqual(self.rpc(self.TOKENS["merlin"])[0], 200)
