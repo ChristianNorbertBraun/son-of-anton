@@ -74,14 +74,14 @@ They use the same submit path as everything else, plus smaller per-client quotas
 
 ## Updating
 
-Son of Anton can update itself from its own releases, so you can improve it with itself. You publish a release on GitHub (UI or CLI) with a tag `vX.Y.Z` whose `anton/version.py` says the same; then `anton update` (or "update yourself" in the chat, via `anton_update_apply`) installs it:
+Son of Anton updates itself from its own releases with [agent-tool-selfupdate](https://github.com/ChristianNorbertBraun/agent-tool-selfupdate), so you can improve it with itself. You publish a release on GitHub (UI or CLI) with a tag `vX.Y.Z` whose `anton/version.py` says the same; then `anton update` (or "update yourself" in the chat, via `anton_update_apply`) installs it together with the newest release of agent-tool-selfupdate that `selfupdate.toml` allows (`~=1.0`: up to the next major). A new release of the library alone is an update too.
 
-1. Only a release published **by the login in `[update] publisher`**, no draft, no pre-release and newer than the running version is accepted (no downgrades without `--force`). Nothing Anton or the chat agents do can publish one; to be sure, restrict tag creation of `v*` to yourself in a GitHub ruleset.
-2. The source archive is unpacked next to the old version (`~/releases/<version>`, plain files only, no links or `..`). Its own tests run in the sandbox and it must be able to read your real config (`anton config-check`).
+1. Only releases published **by the login in `[update] publisher`**, no drafts, no pre-releases, newer than the running version (no downgrades). Nothing Anton or the chat agents do can publish one; to be sure, restrict tag creation of `v*` to yourself in a GitHub ruleset.
+2. Both archives are unpacked next to the old version (`~/releases/<version>+u<library>`, plain files only). The library's and Anton's tests run in the sandbox, the new updater must still find the releases (probe), and the new code must read your real config (`anton config-check`).
 3. Running jobs finish first (no new job starts meanwhile, queued ones wait). Then `~/current` points to the new version in one step, the service restarts and must report the new version and stay up for 15 seconds.
-4. If that fails the symlink goes back and the old version is started again. A Telegram message says what happened. Three versions are kept.
+4. If that fails the symlink goes back and the old version is started again. A Telegram message says what happened, and `anton_update_check` shows the last result. Three versions are kept.
 
-`~/bin/anton` and the service run `~/current`. Merging a PR never changes the running installation; only a release you publish and an update you ask for do. Add `[update]` to the config to turn it on (see `examples/repos.toml`).
+`~/bin/anton` and the service run `~/current`. Merging a PR never changes the running installation; only a release you publish and an update you ask for do. Add `[update]` to the config to turn it on (see `examples/repos.toml`). An installation from before 0.3.0 gets the library once by hand: see "First installation" in the library's README.
 
 ## Commands
 
@@ -99,7 +99,12 @@ anton version
 anton run --repo o/r --task "..." [--dry-run]   # one job now, no queue
 ```
 
-Tests: `python3 -m unittest discover -s tests`
+Tests: `python3 -m unittest discover -s tests`. The tests of the update adapter need agent-tool-selfupdate next to the package (it is in `.gitignore`); without it they are skipped. Fetch it with:
+
+```
+d=$(mktemp -d) && curl -fsSL https://github.com/ChristianNorbertBraun/agent-tool-selfupdate/archive/refs/tags/v1.0.0.tar.gz | tar xz -C "$d" --strip-components=1
+PYTHONPATH="$d" python3 -m agent_tool_selfupdate fetch --publisher ChristianNorbertBraun --into .
+```
 
 ## Limits
 
