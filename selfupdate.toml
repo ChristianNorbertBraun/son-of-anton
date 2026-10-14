@@ -1,0 +1,9 @@
+# How agent-tool-selfupdate installs this project (see https://github.com/ChristianNorbertBraun/agent-tool-selfupdate).
+package = "anton"
+service = "anton.service"
+state = ".local/state/son-of-anton"
+test_timeout = 900
+
+[library]
+repo = "ChristianNorbertBraun/agent-tool-selfupdate"
+version = "~=1.0"

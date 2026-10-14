@@ -212,7 +212,8 @@ def cmd_config_check(_: argparse.Namespace) -> int:
 
 
 def cmd_update(a: argparse.Namespace) -> int:
-    """Install the newest release published by you on GitHub (see [update] in the config)."""
+    """Install the newest release published by you on GitHub (see [update] in the config), together with the
+    newest agent-tool-selfupdate that selfupdate.toml allows."""
     from . import telegram
     settings = config.load_settings()
     cfg = settings.update
@@ -220,25 +221,23 @@ def cmd_update(a: argparse.Namespace) -> int:
         print("update is off: add an [update] section (repo, publisher) to the config", file=sys.stderr)
         return 2
     try:
-        release = updater.find_release(cfg, to=a.to)
+        p = updater.plan(cfg, to=a.to)
     except updater.UpdateRefused as e:
         print(f"no update: {e}", file=sys.stderr)
         return 1
-    newer = updater.is_newer(release)
-    print(f"installed {__version__}, release {release.tag}{' (newer)' if newer else ''}")
+    print(p.summary())
     if a.check:
-        print(safe(release.notes, 500) if newer else "up to date")
+        print(safe(p.notes(), 500) if p.newer else "up to date")
         return 0
-    if not (newer or a.force):
+    if not (p.newer or a.force):
         print("nothing to do")
         return 0
-    if not a.yes and input(f"install {release.tag}? [y/N] ").strip().lower() != "y":
+    if not a.yes and input(f"install {p.target}? [y/N] ").strip().lower() != "y":
         return 1
     q = open_queue(settings)
-    deps = updater.Deps(running_jobs=lambda: sum(1 for r in q.list(active_only=True) if r.status == "running"),
-                        notify=telegram.notify)
-    res = updater.update(cfg, updater.Layout(), deps, to=a.to, force=a.force, wait_seconds=a.wait * 60)
-    return 0 if res.status in ("updated", "current") else 1
+    status = updater.update(cfg, running_jobs=lambda: sum(1 for r in q.list(active_only=True) if r.status == "running"),
+                            notify=telegram.notify, to=a.to, force=a.force, wait_seconds=a.wait * 60)
+    return 0 if status in ("updated", "current") else 1
 
 
 def cmd_jobs(_: argparse.Namespace) -> int:
@@ -293,8 +292,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config-check", help="load the config and exit").set_defaults(fn=cmd_config_check)
     up = sub.add_parser("update", help="install the newest release")
     up.add_argument("--check", action="store_true", help="only show what is available")
-    up.add_argument("--to", help="a specific release, e.g. v0.2.0")
-    up.add_argument("--force", action="store_true", help="also reinstall the same or an older version")
+    up.add_argument("--to", help="install this tag instead of the newest release (only releases with a selfupdate.toml)")
+    up.add_argument("--force", action="store_true", help="also install an older version (never the installed one)")
     up.add_argument("--yes", action="store_true", help="do not ask")
     up.add_argument("--wait", type=int, default=30, help="minutes to wait for running jobs")
     up.set_defaults(fn=cmd_update)
