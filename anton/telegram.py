@@ -23,8 +23,8 @@ def full_text(text, limit: int = TASK_LIMIT) -> str:
 
 
 def format_event(event: str, row: JobRow) -> str | None:
-    if getattr(row, "kind", "change") == "ask":
-        return None  # a question is answered in the chat itself, no extra messages
+    if getattr(row, "kind", "change") in ("ask", "step"):
+        return None  # a question is answered in the chat itself, and a flow would send one message per step
     pr_number = getattr(row, "pr_number", None)
     if event == "started":
         what = f"{row.repo} PR #{pr_number}" if pr_number else row.repo

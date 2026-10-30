@@ -32,6 +32,12 @@ class Service:
         self.queue.record_action(requested_by, "ask")
         return row
 
+    def submit_step(self, repo: str, task: str, flow_id: str, step_id: str, attempt: int,
+                    spec: dict) -> tuple[JobRow, bool]:
+        """Queue one step of a flow. Only the conductor calls this; the daily limit holds for each step."""
+        config.get_repo(self.repos, repo)
+        return self.queue.enqueue_step(repo, task, flow_id, step_id, attempt, spec)
+
     def allow_write(self, requester: str, kind: str) -> None:
         """Count one GitHub write action (create/update issue, comment) or refuse when the day's budget is used."""
         if self.write_limit is not None and self.queue.actions_by(requester, exclude_kind="ask") >= self.write_limit:

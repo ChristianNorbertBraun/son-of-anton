@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import secrets
@@ -14,10 +15,13 @@ from typing import Callable, Iterator
 from .config import SLUG_RE
 
 ACTIVE = ("queued", "running")
-FINAL = ("pr-open", "no-changes", "answered", "proposed", "failed", "cancelled")
+FINAL = ("pr-open", "no-changes", "answered", "proposed", "failed", "cancelled", "step-done")
 DAY = 86400
 MAX_TASK_CHARS = 20_000
+MAX_SPEC_CHARS = 200_000
 REQUESTER_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")
+STEP_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+COUNTED = "kind IN ('change','step')"  # jobs that run a model on a change count against the daily limit
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -26,7 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   created INTEGER NOT NULL, started INTEGER, finished INTEGER,
   pr TEXT, reason TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
   pr_number INTEGER,
-  kind TEXT NOT NULL DEFAULT 'change',  -- 'change' = a code change, 'ask' = a read-only question about a repo
+  kind TEXT NOT NULL DEFAULT 'change',  -- 'change' = a code change, 'ask' = a read-only question, 'step' = one step of a flow
   answer TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, created);
@@ -34,6 +38,13 @@ CREATE TABLE IF NOT EXISTS actions (  -- GitHub write actions of chat agents (is
   id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, requester TEXT NOT NULL, kind TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS actions_requester ON actions (requester, ts);
+CREATE TABLE IF NOT EXISTS step_jobs (  -- a side table: older code does JobRow(**row) and must not see new columns in jobs
+  job_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, step_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+  spec TEXT NOT NULL,
+  intended_sha TEXT,  -- written BEFORE the push: after a crash, this SHA on the remote means the step did finish
+  output TEXT,
+  UNIQUE (flow_id, step_id, attempt)
+);
 """
 
 
@@ -64,6 +75,22 @@ class JobRow:
     answer: str | None = None
 
 
+@dataclass(frozen=True)
+class StepRow:
+    job_id: str
+    flow_id: str
+    step_id: str
+    attempt: int
+    spec: dict
+    intended_sha: str | None = None
+    output: dict | None = None
+
+
+def _step_row(r: sqlite3.Row) -> StepRow:
+    return StepRow(r["job_id"], r["flow_id"], r["step_id"], r["attempt"], json.loads(r["spec"]), r["intended_sha"],
+                   json.loads(r["output"]) if r["output"] else None)
+
+
 def _row(r: sqlite3.Row) -> JobRow:
     d = dict(r)
     d["cancel_requested"] = bool(d["cancel_requested"])
@@ -86,6 +113,21 @@ def validate(repo: str, task: str, issue: int | None, requested_by: str, pr_numb
         raise InputError("a job is either for an issue or for a pull request, not both")
     if not isinstance(requested_by, str) or not REQUESTER_RE.fullmatch(requested_by):
         raise InputError("invalid requested_by")
+
+
+def validate_step(flow_id: str, step_id: str, attempt: int, spec: dict) -> str:
+    """Return the spec as JSON."""
+    for value in (flow_id, step_id):
+        if not isinstance(value, str) or not STEP_ID_RE.fullmatch(value):
+            raise InputError("invalid flow or step id")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or not 0 < attempt < 2**31:
+        raise InputError("attempt must be a positive integer")
+    if not isinstance(spec, dict):
+        raise InputError("spec must be a dictionary")
+    text = json.dumps(spec)
+    if len(text) > MAX_SPEC_CHARS:
+        raise InputError(f"spec too long (max {MAX_SPEC_CHARS} characters)")
+    return text
 
 
 class Queue:
@@ -119,8 +161,19 @@ class Queue:
 
     def _used(self, c: sqlite3.Connection) -> int:
         # a job that actually started cost Claude tokens, even if it was cancelled afterwards
-        return c.execute("SELECT COUNT(*) FROM jobs WHERE kind='change' AND created>=? "
+        return c.execute(f"SELECT COUNT(*) FROM jobs WHERE {COUNTED} AND created>=? "
                          "AND (status!='cancelled' OR started IS NOT NULL)", (self._now() - DAY,)).fetchone()[0]
+
+    def _admit(self, c: sqlite3.Connection, counted: bool) -> None:
+        waiting = c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0]
+        if waiting >= self.max_queued:
+            raise LimitError(f"queue is full ({waiting}/{self.max_queued} waiting)")
+        used = self._used(c)
+        if counted and used >= self.daily_limit:  # questions have their own, separate limit
+            raise LimitError(f"daily limit reached ({used}/{self.daily_limit} jobs in 24h)")
+
+    def _new_id(self) -> str:
+        return time.strftime("%Y%m%d-%H%M%S-", time.localtime(self._now())) + secrets.token_hex(3)
 
     def enqueue(self, repo: str, task: str, issue: int | None = None,
                 requested_by: str = "cli", pr_number: int | None = None,
@@ -142,13 +195,8 @@ class Queue:
                     if dup:
                         c.execute("COMMIT")
                         return _row(dup), False
-                waiting = c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0]
-                if waiting >= self.max_queued:
-                    raise LimitError(f"queue is full ({waiting}/{self.max_queued} waiting)")
-                used = self._used(c)
-                if kind == "change" and used >= self.daily_limit:  # questions have their own, separate limit
-                    raise LimitError(f"daily limit reached ({used}/{self.daily_limit} jobs in 24h)")
-                job_id = time.strftime("%Y%m%d-%H%M%S-", time.localtime(self._now())) + secrets.token_hex(3)
+                self._admit(c, counted=kind == "change")
+                job_id = self._new_id()
                 c.execute("INSERT INTO jobs (id, repo, issue, task, status, requested_by, created, pr_number, kind) "
                           "VALUES (?,?,?,?, 'queued', ?, ?, ?, ?)",
                           (job_id, repo, issue, task, requested_by, self._now(), pr_number, kind))
@@ -157,6 +205,53 @@ class Queue:
                 c.execute("ROLLBACK")
                 raise
             return _row(c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()), True
+
+    def enqueue_step(self, repo: str, task: str, flow_id: str, step_id: str, attempt: int, spec: dict,
+                     requested_by: str = "conductor") -> tuple[JobRow, bool]:
+        """Return (job, created). The same flow, step and attempt always give the same job, so a conductor that
+        restarts between enqueueing and recording it cannot start a step twice. The job row has no issue: a step
+        must not meet the issue dedupe of normal jobs, and the issue reporter must not comment on each step."""
+        validate(repo, task, None, requested_by)
+        text = validate_step(flow_id, step_id, attempt, spec)
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                dup = c.execute("SELECT j.* FROM jobs j JOIN step_jobs s ON s.job_id=j.id "
+                                "WHERE s.flow_id=? AND s.step_id=? AND s.attempt=?",
+                                (flow_id, step_id, attempt)).fetchone()
+                if dup:
+                    c.execute("COMMIT")
+                    return _row(dup), False
+                self._admit(c, counted=True)
+                job_id = self._new_id()
+                c.execute("INSERT INTO jobs (id, repo, task, status, requested_by, created, kind) "
+                          "VALUES (?,?,?, 'queued', ?, ?, 'step')", (job_id, repo, task, requested_by, self._now()))
+                c.execute("INSERT INTO step_jobs (job_id, flow_id, step_id, attempt, spec) VALUES (?,?,?,?,?)",
+                          (job_id, flow_id, step_id, attempt, text))
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+            return _row(c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()), True
+
+    def step(self, job_id: str) -> StepRow | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM step_jobs WHERE job_id=?", (job_id,)).fetchone()
+            return _step_row(r) if r else None
+
+    def step_job(self, flow_id: str, step_id: str, attempt: int) -> JobRow | None:
+        with self._conn() as c:
+            r = c.execute("SELECT j.* FROM jobs j JOIN step_jobs s ON s.job_id=j.id "
+                          "WHERE s.flow_id=? AND s.step_id=? AND s.attempt=?", (flow_id, step_id, attempt)).fetchone()
+            return _row(r) if r else None
+
+    def record_intended_sha(self, job_id: str, sha: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE step_jobs SET intended_sha=? WHERE job_id=?", (sha, job_id))
+
+    def record_step_output(self, job_id: str, output: dict) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE step_jobs SET output=? WHERE job_id=?", (json.dumps(output), job_id))
 
     def claim_next(self, max_parallel: int) -> JobRow | None:
         """Atomically move the oldest queued job to running, if capacity allows."""
@@ -228,7 +323,7 @@ class Queue:
 
     def used_by(self, requester: str) -> int:
         with self._conn() as c:
-            return c.execute("SELECT COUNT(*) FROM jobs WHERE kind='change' AND requested_by=? AND created>=? "
+            return c.execute(f"SELECT COUNT(*) FROM jobs WHERE {COUNTED} AND requested_by=? AND created>=? "
                              "AND (status!='cancelled' OR started IS NOT NULL)",
                              (requester, self._now() - DAY)).fetchone()[0]
 
