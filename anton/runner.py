@@ -18,7 +18,7 @@ from .config import WEB_TOOLS, RepoConfig, Settings, get_repo
 from .github import GitHub
 from .models import Cancelled, Outcome
 from .proc import run_capped
-from .queue import JobRow
+from .queue import JobRow, Queue
 
 HOME = Path.home()
 CONF_DIR = HOME / ".config/son-of-anton"
@@ -179,14 +179,17 @@ def claude_argv(repo: RepoConfig, ask: bool = False) -> list[str]:
             "--allowedTools", *tools, "--disallowedTools", *deny]
 
 
-def run_claude(job: Job, should_cancel: Callable[[], bool]) -> dict:
+def run_claude(job: Job, should_cancel: Callable[[], bool], argv: list[str] | None = None,
+               prompt: str | None = None) -> dict:
+    """`argv` and `prompt`: a flow step brings its own; other jobs build them from the job."""
     ask = job.kind == "ask"
-    prompt = job.task if job.issue is None else f"Implement GitHub issue #{job.issue}.\n\n{job.task}"
-    if ask:
-        prompt = f"Question about this repository:\n\n{job.task}"
-    prompt += job.context
+    if prompt is None:
+        prompt = job.task if job.issue is None else f"Implement GitHub issue #{job.issue}.\n\n{job.task}"
+        if ask:
+            prompt = f"Question about this repository:\n\n{job.task}"
+        prompt += job.context
     job.log(f"claude: starting in sandbox (max_turns={job.repo.max_turns}, timeout={job.repo.timeout_minutes}m)")
-    code, out, truncated = run_capped(sb_cmd(job.work, claude_argv(job.repo, ask), with_claude=True), cwd=job.work,
+    code, out, truncated = run_capped(sb_cmd(job.work, argv or claude_argv(job.repo, ask), with_claude=True), cwd=job.work,
                                       env=clean_env(with_claude_token=True), timeout=job.repo.timeout_minutes * 60,
                                       limit=CLAUDE_OUT_LIMIT, tail=False, stdin_text=prompt,
                                       should_cancel=should_cancel)
@@ -252,6 +255,29 @@ def github_for(settings: Settings, repo: RepoConfig) -> GitHub:
     return GitHub(settings.github.app_id, KEY_PATH, repo)
 
 
+def clone(job: Job, url: str, ref: str, env: dict) -> None:
+    job.log(f"clone {job.repo.slug}@{ref}")
+    gitops.git(["clone", "--quiet", "--depth", "50", "--branch", ref, url, str(job.work)], env=env)
+
+
+@dataclass(frozen=True)
+class Staged:
+    problems: list[str]  # hard problems: always refused
+    protected: list[str]  # never pushed, but can be handed over as a patch
+    patch: str = ""
+    leaks: tuple[str, ...] = ()
+
+
+def inspect_staged(job: Job, protected: tuple[str, ...]) -> Staged:
+    """Stage everything and look at it. Nothing that fails here may leave the machine."""
+    gitops.git(["add", "-A"], job.work)
+    problems, protected_paths = gitops.split_staged(job.work, protected)
+    if problems:
+        return Staged(problems, protected_paths)
+    patch = gitops.staged_patch(job.work)
+    return Staged(problems, protected_paths, patch, tuple(tripwire.scan(patch, tripwire.secret_values(CONF_DIR))))
+
+
 def execute_ask(job: Job, settings: Settings, should_cancel: Callable[[], bool]) -> Outcome:
     """Answer a question about the repo: shallow clone, no install, no checks, Claude with read-only tools.
     Nothing is created or pushed anywhere."""
@@ -299,10 +325,8 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
         branch, clone_ref = gitops.branch_name(job.issue, job.id), repo.base  # neutral name until the title exists
         gitops.assert_pushable(branch, repo.base)
 
-    job.log(f"clone {repo.slug}@{clone_ref}")
-    gitops.git(["clone", "--quiet", "--depth", "50", "--branch", clone_ref,
-                f"https://github.com/{repo.slug}.git", str(job.work)],
-               env=gitops.auth_env(token({"contents": "read"}), gh.bot_name, gh.bot_id))
+    clone(job, f"https://github.com/{repo.slug}.git", clone_ref,
+          gitops.auth_env(token({"contents": "read"}), gh.bot_name, gh.bot_id))
     if pr_info is None:
         gitops.git(["checkout", "-q", "-b", branch], job.work)
     checkpoint()
@@ -324,16 +348,14 @@ def execute(job: Job, settings: Settings, dry_run: bool = False,
     if not gitops.changed_files(job.work):
         job.state("no-changes")
         return Outcome("no-changes")
-    gitops.git(["add", "-A"], job.work)
-    problems, protected = gitops.split_staged(job.work, repo.protected_paths)
-    if problems:
-        job.state("failed", reason="blocked changes", paths=problems)
-        return Outcome("failed", reason=safe("blocked changes: " + ", ".join(problems[:5])))
-    patch = gitops.staged_patch(job.work)
-    leaks = tripwire.scan(patch, tripwire.secret_values(CONF_DIR))
-    if leaks:  # nothing that looks like a token or key leaves this machine, in a PR or in a patch
-        job.state("failed", reason="secret in change", findings=leaks)
-        return Outcome("failed", reason=safe("blocked: " + ", ".join(leaks[:5])))
+    staged = inspect_staged(job, repo.protected_paths)
+    if staged.problems:
+        job.state("failed", reason="blocked changes", paths=staged.problems)
+        return Outcome("failed", reason=safe("blocked changes: " + ", ".join(staged.problems[:5])))
+    patch, protected = staged.patch, staged.protected
+    if staged.leaks:  # nothing that looks like a token or key leaves this machine, in a PR or in a patch
+        job.state("failed", reason="secret in change", findings=list(staged.leaks))
+        return Outcome("failed", reason=safe("blocked: " + ", ".join(staged.leaks[:5])))
     title, summary = split_title(result.get("result", ""), job)
     patch = patch if protected else None  # protected paths are never pushed
     if pr_info is None and patch is None:
@@ -412,10 +434,13 @@ def run_job(job: Job, settings: Settings, dry_run: bool = False,
 
 
 def run_queued(row: JobRow, settings: Settings, should_cancel: Callable[[], bool],
-               dry_run: bool = False) -> Outcome:
+               dry_run: bool = False, queue: Queue | None = None) -> Outcome:
     """Pool entry point."""
     if row.kind == "step":  # never fall through to `execute`: a step is not a change job
-        return Outcome("failed", reason="this release cannot run step jobs")
+        if dry_run or queue is None:
+            return Outcome("failed", reason="step jobs need the queue and do not support dry runs")
+        from . import steps  # local import: steps is built on top of this module
+        return steps.run_step(row, settings, should_cancel, queue)
     return run_job(new_job(get_repo(settings.repos, row.repo), row.task, row.issue, job_id=row.id,
                            pr_number=row.pr_number, kind=row.kind), settings, dry_run=dry_run,
                    should_cancel=should_cancel)
