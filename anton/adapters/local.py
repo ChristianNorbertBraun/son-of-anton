@@ -33,6 +33,9 @@ class LocalTracker:
             raise AdapterError(f"no task {key}")
         return data[key]
 
+    def prepare(self) -> None:
+        pass
+
     def list_ready(self) -> list[Task]:
         return [self._as_task(t) for t in self.store.load().values()
                 if t["state"] == "open" and any(label.startswith("flow:") for label in t["labels"])]

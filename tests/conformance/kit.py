@@ -15,6 +15,10 @@ class Contract:
 
     # tracker
 
+    def test_prepare_can_be_repeated(self):
+        self.tracker.prepare()
+        self.tracker.prepare()
+
     def test_a_task_with_a_flow_label_is_ready(self):
         self.owner.add("1", title="T", body="B", author="alice", labels=("flow:quick", "bug"), label_actor="bob")
         tasks = self.tracker.list_ready()

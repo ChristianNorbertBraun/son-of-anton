@@ -58,6 +58,7 @@ class AdapterError(Exception):
 class TrackerAdapter(Protocol):
     capabilities: set[str]
 
+    def prepare(self) -> None: ...  # once per start: whatever the tracker needs before the first task
     def list_ready(self) -> list[Task]: ...  # open tasks with a workflow label
     def get(self, key: str) -> Task: ...
     def claim(self, key: str, label: str) -> None: ...  # take the label off; repeating it changes nothing
