@@ -2,6 +2,7 @@
 It runs through the SAME functions the runner uses (sb_cmd, clean_env), not a copy of them."""
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,6 +20,7 @@ t mask-hides-planted-settings test -e /work/.claude/settings.json
 t mask-mcp-is-empty           test -s /work/.mcp.json
 t mask-mcp-refuses-writes     sh -c 'echo x > /work/.mcp.json'
 t mask-local-refuses-writes   sh -c 'echo x > /work/CLAUDE.local.md'
+y mask-mcp-is-readable        cat /work/.mcp.json
 y mask-claude-dir-writable    touch /work/.claude/vanishes
 y repo-instructions-visible   test -s /work/CLAUDE.md
 """
@@ -34,6 +36,8 @@ def check_masks(work: Path) -> list[str]:
     _, out, _ = run_capped(runner.sb_cmd(work, ["bash", "-c", MASK_SCRIPT], masks=True), cwd=None,
                            env=runner.clean_env(), timeout=60, limit=8000)
     lines = [ln for ln in out.splitlines() if ln.startswith(("PASS", "FAIL"))]
+    expected = re.findall(r"^[ty] (\S+)", MASK_SCRIPT, re.M)  # a sandbox that never started must not look like a pass
+    lines += [f"FAIL {name} (did not run)" for name in expected if not any(name in ln for ln in lines)]
     lines.append("FAIL mask-writes-reach-the-checkout" if (work / ".claude/vanishes").exists()
                  or (work / ".mcp.json").read_text() != '{"mcpServers": {}}' else "PASS mask-writes-vanish")
     return lines

@@ -603,11 +603,11 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.go()[1].status, "failed")
 
     def test_a_secret_in_the_change_fails_the_job_in_a_pr_and_in_a_patch(self):
-        leaked = "diff --git a/src/a.js b/src/a.js\n+++ b/src/a.js\n+const k = 'sk-ant-oat01-" + "A" * 30 + "'\n"
+        leaked = ("diff --git a/src/a.js b/src/a.js\n+++ b/src/a.js\n@@ -0,0 +1 @@\n"
+                  "+const k = 'sk-ant-oat01-" + "A" * 30 + "'\n")
         for protected in ([], [".github/x.yml"]):
-            with self.subTest(protected=protected):
+            with self.subTest(protected=protected), mock.patch.object(runner.gitops, "staged_text", return_value=leaked):
                 self.protected = protected
-                runner.gitops.staged_patch.side_effect = lambda cwd: leaked
                 _, out = self.go()
                 self.assertEqual(out.status, "failed")
                 self.assertIn("Claude token in src/a.js", out.reason)

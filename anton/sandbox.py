@@ -23,6 +23,7 @@ MAX_FILE_KB = 1024 * 1024  # largest single file a sandboxed process may write (
 MAX_PROCS = 1024
 # Hidden from Claude in flow steps, which load the repo's CLAUDE.md: everything else that a checkout can use to
 # configure Claude stays out of reach. A file becomes read-only and empty, writes to the directory vanish with it.
+# Not /dev/null: a ro-bind is mounted nodev, so opening it there fails instead of reading nothing.
 MASKED_DIRS = (".claude",)
 MASKED_FILES = (".mcp.json", "CLAUDE.local.md")
 MASK_BYTES = 1024 * 1024
@@ -75,8 +76,10 @@ def wrap(cmd: list[str], work: Path, claude_bin: Path | None = None,
         check_masks(work)
         for name in MASKED_DIRS:
             args += ["--size", str(MASK_BYTES), "--tmpfs", f"{WORK}/{name}"]
+        empty = work.parent / "mask-empty"
+        empty.touch(mode=0o400)
         for name in MASKED_FILES:
-            args += ["--ro-bind", "/dev/null", f"{WORK}/{name}"]
+            args += ["--ro-bind", str(empty), f"{WORK}/{name}"]
     if claude_bin is not None:
         args += ["--ro-bind", str(Path(claude_bin).resolve()), CLAUDE_IN_SANDBOX]
     return args + ["--chdir", WORK, "--", "bash", "-c", LIMIT_SCRIPT, "_", *cmd]

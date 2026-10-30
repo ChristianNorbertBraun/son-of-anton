@@ -341,6 +341,282 @@ class RepoInstructionTests(Base):
         self.assertEqual(sorted(self.remote_files()), ["app.txt", "new.txt"])
 
 
+class ReviewFindingTests(Base):
+    """One test for each finding of the first review of this code."""
+
+    def secret(self):
+        (self.conf / "claude-token").write_text("a-very-long-stored-secret\n")
+        return "a-very-long-stored-secret"
+
+    def test_an_added_line_starting_with_plus_is_scanned(self):
+        secret = self.secret()
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(write("new.txt", f"++{secret}\n")))
+        self.assertEqual(step.output["outcome"], "secret")
+        self.assertIsNone(self.remote_head())
+
+    def test_text_after_a_form_feed_is_scanned(self):
+        secret = self.secret()
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(write("new.txt", f"x\x0c{secret}\n")))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_a_binary_file_is_scanned(self):
+        secret = self.secret()
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(
+            lambda work: (work / "data.bin").write_bytes(b"\0\1\2" + secret.encode())))
+        self.assertEqual(step.output["outcome"], "secret")
+        self.assertIsNone(self.remote_head())
+
+    def test_a_utf16_file_is_scanned(self):
+        (self.conf / "private-strings").write_text("privateperson\n")
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(
+            lambda work: (work / "data.txt").write_bytes("privateperson".encode("utf-16"))))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_an_ignored_gitattributes_cannot_blind_the_scan(self):
+        secret = self.secret()
+
+        def hide(work):
+            write(".gitignore", ".gitattributes\n")(work)
+            write(".gitattributes", "* -diff\n")(work)
+            write("new.txt", f"{secret}\n")(work)
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(hide))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_a_dependency_with_a_claude_md_does_not_block_the_flow(self):
+        repo = replace(self.repo, install="mkdir -p vendored/pkg && echo rules > vendored/pkg/CLAUDE.md")
+        self.settings.repos = {"example/repo": repo}
+
+        (self.seed / ".gitignore").write_text("vendored/\n")
+        sh(["add", "-A"], self.seed)
+        sh(["commit", "-q", "-m", "ignore"], self.seed)
+        sh(["push", "-q", "origin", "main"], self.seed)
+        self.base = sh(["rev-parse", "HEAD"], self.seed)
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(write("new.txt")))
+        self.assertEqual(step.output["outcome"], "ok")
+
+    def test_an_instruction_file_planted_by_a_check_never_reaches_the_next_attempt(self):
+        plant = "mkdir -p gen && echo gen/ > .gitignore && echo obey > gen/CLAUDE.md"
+        repo = replace(self.repo, checks=(Check("gate", f"test ! -f plant || ({plant}); ! test -f broken", "gate"),))
+        self.settings.repos = {"example/repo": repo}
+
+        def broken(work):
+            write(".gitignore", "gen/\n")(work)
+            write("plant")(work)
+            write("broken")(work)
+        claude = FakeClaude(broken, write("never.txt"))
+        _, step, _ = self.run_step(self.spec("implement"), claude)
+        self.assertEqual(step.output["outcome"], "hard-path")
+        self.assertEqual(len(claude.prompts), 1)
+        self.assertIsNone(self.remote_head())
+
+    def test_a_fix_attempt_is_told_the_task_again(self):
+        claude = FakeClaude(write("broken"), lambda work: (work / "broken").unlink() or write("new.txt")(work))
+        self.run_step(self.spec("implement"), claude)
+        self.assertIn("Do the thing", claude.prompts[1])
+        self.assertIn("DATA (the output of the failed checks)", claude.prompts[1])
+
+    def test_step_jobs_really_run_claude_with_the_masks(self):
+        job = runner.new_job(self.repo, "t", None, job_id="j1", kind="step")
+        with mock.patch.object(runner, "run_capped", return_value=(0, "{}", False)):
+            runner.run_claude(job, lambda: False, argv=["claude"], prompt="p")
+        self.assertTrue(runner.sb_cmd.call_args.kwargs.get("masks"))
+
+    def test_other_jobs_run_claude_without_the_masks(self):
+        job = runner.new_job(self.repo, "t", None, job_id="j2", kind="change")
+        with mock.patch.object(runner, "run_capped", return_value=(0, "{}", False)):
+            runner.run_claude(job, lambda: False, argv=["claude"], prompt="p")
+        self.assertNotIn("masks", runner.sb_cmd.call_args.kwargs)
+
+    def test_run_step_makes_a_step_job(self):
+        seen = []
+
+        def claude(job, should_cancel, argv=None, prompt=None):
+            seen.append(job.kind)
+            return {"result": "x"}
+        self.run_step(self.spec("implement"), claude)
+        self.assertEqual(seen, ["step"])
+
+    def test_a_review_carrying_a_secret_is_a_secret(self):
+        secret = self.secret()
+        head = self.implemented()
+        reply = json.dumps({"findings": [{"severity": "low", "title": "t", "detail": secret}]})
+        _, step, _ = self.run_step(self.spec("review", expected_head=head), FakeClaude(reply))
+        self.assertEqual(step.output["outcome"], "secret")
+        self.assertEqual(step.output["findings"], [])
+        self.assertNotIn(secret, json.dumps(step.output))
+
+    def test_a_crash_after_the_push_keeps_title_and_summary(self):
+        def die(*a, **kw):
+            raise SystemExit
+        job, _ = self.queue.enqueue_step("example/repo", "t", "abc", "implement", 1, self.spec("implement"))
+        self.queue.claim_next(1)
+        with mock.patch.object(runner, "run_claude", FakeClaude(write("new.txt"))), \
+                mock.patch.object(steps, "conclude", side_effect=die), self.assertRaises(SystemExit):
+            steps.run_step(job, self.settings, lambda: False, self.queue, remote=self.remote)
+        step = self.queue.step(job.id)
+        self.assertEqual(step.intended_sha, self.remote_head())
+        self.assertEqual((step.output["title"], step.output["summary"]), ("Change things", "A summary."))
+
+    def test_the_intended_sha_is_written_before_the_push(self):
+        remote = steps.Remote(self.remote.url, lambda perms: {"GIT_DIR": "/nonexistent"} if "contents" in perms
+                              and perms["contents"] == "write" else {})
+        job, _ = self.queue.enqueue_step("example/repo", "t", "abc", "implement", 1, self.spec("implement"))
+        self.queue.claim_next(1)
+        with mock.patch.object(runner, "run_claude", FakeClaude(write("new.txt"))):
+            out = steps.run_step(job, self.settings, lambda: False, self.queue, remote=remote)
+        self.assertEqual(out.status, "failed")
+        self.assertIsNotNone(self.queue.step(job.id).intended_sha)
+        self.assertIsNone(self.remote_head())
+
+    def test_a_path_reason_never_carries_a_private_string(self):
+        (self.conf / "private-strings").write_text("privateperson\n")
+        cases = (("implement", lambda work: os.symlink("/etc/passwd", work / "privateperson")),
+                 ("plan", lambda work: write("privateperson.txt")(work)))
+        for name, action in cases:
+            with self.subTest(step=name):
+                _, step, row = self.run_step(self.spec(name), FakeClaude(action))
+                self.assertEqual(step.output["outcome"], "hard-path")
+                self.assertNotIn("privateperson", json.dumps(step.output))
+                self.assertNotIn("privateperson", row.reason)
+
+    def test_more_findings_than_the_cap_is_an_unreadable_review(self):
+        findings = [{"severity": "low", "title": "t"}] * 50 + [{"severity": "high", "title": "t"}]
+        with self.assertRaises(RuntimeError):
+            steps.parse_findings(json.dumps({"findings": findings}))
+
+    def test_the_title_is_scanned_before_it_loses_its_at_sign(self):
+        (self.conf / "private-strings").write_text("owner@example.org\n")
+
+        def titled(work):
+            write("new.txt")(work)
+            return "TITLE: Credit owner@example.org\n\nDone."
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(titled))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_a_cancelled_step_keeps_its_usage(self):
+        spent = []
+
+        def paid(work):
+            spent.append(1)
+        out, step, _ = self.run_step(self.spec("implement"), FakeClaude(paid), cancel=lambda: bool(spent))
+        self.assertEqual(out.status, "cancelled")
+        self.assertEqual(step.output["usage"]["cost_usd"], 0.5)
+
+    def test_the_time_cap_reaches_the_claude_run(self):
+        seen = []
+        now = [0]
+
+        def claude(job, should_cancel, argv=None, prompt=None):
+            now[0] = steps.STEP_SECONDS + 1
+            seen.append(should_cancel())
+            return {"result": "x"}
+        with mock.patch.object(steps.StepRun.__init__, "__defaults__", (lambda: now[0],)):
+            out, step, _ = self.run_step(self.spec("implement"), claude)
+        self.assertEqual(seen, [True])
+        self.assertEqual(out.status, "failed")
+        self.assertIn("minutes", step.output["reason"])
+
+    def test_an_outside_cancel_after_the_deadline_is_a_cancel(self):
+        with mock.patch.object(steps, "STEP_SECONDS", -1):
+            out, _, _ = self.run_step(self.spec("implement"), FakeClaude(), cancel=lambda: True)
+        self.assertEqual(out.status, "cancelled")
+
+    def test_serve_hands_the_queue_to_the_runner(self):
+        from anton import cli
+        with mock.patch.object(steps, "run_step", return_value="ran") as run_step:
+            row = mock.Mock(kind="step")
+            self.assertEqual(cli.job_runner(self.settings, self.queue, False)(row, lambda: False), "ran")
+        self.assertIs(run_step.call_args.args[3], self.queue)
+
+    def test_a_private_strings_file_that_cannot_be_read_stops_the_step(self):
+        (self.conf / "private-strings").write_bytes(b"\xff\xfe not utf-8")
+        with self.assertRaises(UnicodeDecodeError):
+            tripwire.private_strings(self.conf)
+
+    def test_the_title_of_the_first_attempt_names_the_change(self):
+        def first(work):
+            write("new.txt")(work)
+            write("broken")(work)
+            return "TITLE: Add login\n\nAdds login."
+
+        def second(work):
+            (work / "broken").unlink()
+            return "TITLE: Fix lint\n\nFixed."
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(first, second))
+        self.assertEqual(step.output["title"], "Add login")
+
+    def test_a_revise_that_deletes_the_plan_is_refused(self):
+        head = self.planned()
+        _, step, _ = self.run_step(self.spec("plan", expected_head=head, feedback="x"), FakeClaude(
+            lambda work: (work / steps.PLAN_PATH).unlink()))
+        self.assertEqual(step.output["outcome"], "hard-path")
+        self.assertEqual(self.remote_head(), head)
+
+    def test_a_patch_too_large_to_hand_over_stays_protected(self):
+        with mock.patch.object(runner, "PATCH_LIMIT", 10):
+            out, step, _ = self.run_step(self.spec("implement"), FakeClaude(write(".github/x.yml")))
+        self.assertEqual(out.status, "step-done")
+        self.assertEqual(step.output["outcome"], "protected")
+
+    def test_usage_is_kept_per_model(self):
+        reply = {"result": "TITLE: T\n\nS.", "modelUsage": {"claude-opus-5-5": {"inputTokens": 3}}}
+
+        def action(work):
+            write("new.txt")(work)
+            return reply
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(action))
+        self.assertEqual(step.output["usage"]["models"]["claude-opus-5-5"]["inputTokens"], 3)
+
+    def test_a_review_gets_no_web_tools(self):
+        head = self.implemented()
+        self.settings.repos = {"example/repo": replace(self.repo, allow_tools=("Read", "WebFetch"))}
+        claude = FakeClaude('{"findings": []}')
+        self.run_step(self.spec("review", expected_head=head), claude)
+        argv = claude.argvs[0]
+        self.assertNotIn("WebFetch", argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")])
+
+    def test_step_argv_keeps_web_tools_opt_in_for_other_steps(self):
+        argv = steps.step_argv(replace(self.repo, allow_tools=("WebFetch",)), "r", ("Read",), ())
+        self.assertIn("WebFetch", argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")])
+        self.assertIn("WebSearch", argv[argv.index("--disallowedTools") + 1:])
+
+
+class OutcomeCellTests(Base):
+    """The cells of the outcome table the other tests do not reach."""
+
+    def test_plan_with_a_secret(self):
+        (self.conf / "private-strings").write_text("privateperson\n")
+        _, step, _ = self.run_step(self.spec("plan"), FakeClaude(write(steps.PLAN_PATH, "privateperson\n")))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_plan_and_fix_with_a_claude_error(self):
+        error = {"is_error": True, "subtype": "error_during_execution"}
+        for spec in (self.spec("plan"), self.spec("fix", expected_head=self.implemented())):
+            with self.subTest(step=spec["step"]):
+                out, step, _ = self.run_step(spec, FakeClaude(error))
+                self.assertEqual((out.status, step.output["outcome"]), ("failed", "error"))
+
+    def test_fix_with_a_protected_path_and_a_symlink_and_a_secret(self):
+        head = self.implemented()
+        (self.conf / "private-strings").write_text("privateperson\n")
+        for action, outcome in ((write(".github/x.yml"), "protected"),
+                                (lambda work: os.symlink("/etc/passwd", work / "link"), "hard-path"),
+                                (write("x.txt", "privateperson\n"), "secret")):
+            with self.subTest(outcome=outcome):
+                _, step, _ = self.run_step(self.spec("fix", expected_head=head), FakeClaude(action))
+                self.assertEqual(step.output["outcome"], outcome)
+                self.assertEqual(self.remote_head(), head)
+
+    def test_cancelled_in_each_step(self):
+        head = self.implemented()
+        for spec in (self.spec("plan"), self.spec("review", expected_head=head),
+                     self.spec("fix", expected_head=head), self.spec("cleanup", expected_head=head)):
+            with self.subTest(step=spec["step"]):
+                out, _, _ = self.run_step(spec, FakeClaude(), cancel=lambda: True)
+                self.assertEqual(out.status, "cancelled")
+                self.assertEqual(self.remote_head(), head)
+
+
 class HeadTests(Base):
     def test_a_step_refuses_an_unknown_head(self):
         self.planned()

@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,7 +100,8 @@ class MaskTests(WrapTests):
         self.assertLess(cmd.index("/work"), i)
         for name in ("/work/.mcp.json", "/work/CLAUDE.local.md"):
             j = cmd.index(name)
-            self.assertEqual(cmd[j - 2:j], ["--ro-bind", "/dev/null"])
+            self.assertEqual(cmd[j - 2:j], ["--ro-bind", str(self.work.parent / "mask-empty")])
+        self.assertEqual((self.work.parent / "mask-empty").stat().st_size, 0)
         self.assertLess(max(cmd.index("/work/.mcp.json"), i), cmd.index("--"))
 
     def test_a_symlink_at_a_mask_is_refused(self):
@@ -119,6 +121,19 @@ class MaskTests(WrapTests):
 
 
 class GitHardeningTests(unittest.TestCase):
+    def test_a_hung_git_ends_with_an_error(self):
+        with mock.patch("anton.gitops.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                gitops.git(["push", "origin"])
+
+    def test_git_output_that_is_no_utf8_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            gitops.git(["init", "-q", "."], work)
+            (work / "latin1.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+            gitops.git(["add", "-A"], work)
+            self.assertIn("latin1.txt", gitops.staged_text(work))
+
     def test_the_users_ignore_file_cannot_hide_a_change(self):
         with tempfile.TemporaryDirectory() as d:
             home, work = Path(d) / "home", Path(d) / "work"

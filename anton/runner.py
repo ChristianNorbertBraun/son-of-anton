@@ -269,6 +269,7 @@ class Staged:
     protected: list[str]  # never pushed, but can be handed over as a patch
     patch: str = ""
     leaks: tuple[str, ...] = ()
+    text: str = ""  # what the scans read: unlike the patch, it has no binary hunks
 
 
 def inspect_staged(job: Job, protected: tuple[str, ...]) -> Staged:
@@ -277,8 +278,9 @@ def inspect_staged(job: Job, protected: tuple[str, ...]) -> Staged:
     problems, protected_paths = gitops.split_staged(job.work, protected)
     if problems:
         return Staged(problems, protected_paths)
-    patch = gitops.staged_patch(job.work)
-    return Staged(problems, protected_paths, patch, tuple(tripwire.scan(patch, tripwire.secret_values(CONF_DIR))))
+    text = gitops.staged_text(job.work)
+    return Staged(problems, protected_paths, gitops.staged_patch(job.work),
+                  tuple(tripwire.scan(text, tripwire.secret_values(CONF_DIR))), text)
 
 
 def execute_ask(job: Job, settings: Settings, should_cancel: Callable[[], bool]) -> Outcome:
