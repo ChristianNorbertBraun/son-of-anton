@@ -117,9 +117,9 @@ def clean_env(with_claude_token: bool = False) -> dict:
     return env
 
 
-def sb_cmd(work: Path, cmd: list[str], with_claude: bool = False) -> list[str]:
+def sb_cmd(work: Path, cmd: list[str], with_claude: bool = False, masks: bool = False) -> list[str]:
     """Wrap a command in the sandbox. Everything repo- or model-controlled goes through here."""
-    return sandbox.wrap(cmd, work, claude_bin=CLAUDE if with_claude else None, protected=(CONF_DIR,))
+    return sandbox.wrap(cmd, work, claude_bin=CLAUDE if with_claude else None, protected=(CONF_DIR,), masks=masks)
 
 
 def install_deps(job: Job, should_cancel: Callable[[], bool]) -> None:
@@ -189,7 +189,10 @@ def run_claude(job: Job, should_cancel: Callable[[], bool], argv: list[str] | No
             prompt = f"Question about this repository:\n\n{job.task}"
         prompt += job.context
     job.log(f"claude: starting in sandbox (max_turns={job.repo.max_turns}, timeout={job.repo.timeout_minutes}m)")
-    code, out, truncated = run_capped(sb_cmd(job.work, argv or claude_argv(job.repo, ask), with_claude=True), cwd=job.work,
+    # a flow step loads the repo's CLAUDE.md, so everything else that configures Claude must be out of reach
+    masks = {"masks": True} if job.kind == "step" else {}
+    code, out, truncated = run_capped(sb_cmd(job.work, argv or claude_argv(job.repo, ask), with_claude=True, **masks),
+                                      cwd=job.work,
                                       env=clean_env(with_claude_token=True), timeout=job.repo.timeout_minutes * 60,
                                       limit=CLAUDE_OUT_LIMIT, tail=False, stdin_text=prompt,
                                       should_cancel=should_cancel)

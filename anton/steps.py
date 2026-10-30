@@ -29,6 +29,9 @@ REVIEW_MAX_TURNS = 20
 MAX_DIFF_CHARS = 150_000
 MAX_FINDINGS = 50
 PLAN_PATH = ".rook/PLAN.md"
+INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md")  # protected at any depth: a later attempt would obey them
+# unlike other jobs a step loads the repo's CLAUDE.md, the rest of what a checkout could configure is masked
+STEP_FLAGS = ["--setting-sources", "project", "--strict-mcp-config", "--disable-slash-commands"]
 FLOW_BRANCH_RE = re.compile(r"anton/flow-[a-z0-9-]{1,60}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SEVERITIES = ("high", "medium", "low")
@@ -153,7 +156,12 @@ class StepRun:
             gitops.git(["checkout", "-q", "-b", branch, self.spec["base_sha"]], self.work)
         elif gitops.head(self.work) != head:
             raise UnknownHead(f"the branch head is not {head[:12]}")
+        gitops.exclude_masked(self.work)
         self.checkpoint()
+
+    @property
+    def protected(self) -> tuple[str, ...]:
+        return (*self.repo.protected_paths, *INSTRUCTION_FILES)
 
     def claude(self, argv: list[str], prompt: str) -> dict:
         result = runner.run_claude(self.job, self.should_cancel, argv=argv, prompt=prompt)
@@ -170,8 +178,9 @@ class StepRun:
 
     def refused(self, staged: runner.Staged, title: str, message: str) -> Result | None:
         """Nothing refused here is pushed. Secrets are checked first: they must not reach a patch either."""
-        if staged.problems:
-            return Result("hard-path", reason=", ".join(staged.problems[:5]))
+        hidden = gitops.hidden_instructions(self.work)
+        if staged.problems or hidden:
+            return Result("hard-path", reason=", ".join([*staged.problems, *hidden][:5]))
         changed = gitops.git(["diff", "--cached", "--name-only", "-z"], self.work).replace("\0", "\n")
         values = tripwire.secret_values(runner.CONF_DIR)
         leaks = [*staged.leaks, *tripwire.scan(staged.patch, [], self.private),
@@ -201,7 +210,7 @@ def step_argv(repo: RepoConfig, rules: str, tools: tuple[str, ...], deny: tuple[
     web = tuple(t for t in WEB_TOOLS if t in repo.allow_tools)
     return [sandbox.CLAUDE_IN_SANDBOX, "-p", "--output-format", "json", "--model", model or repo.model,
             "--max-turns", str(min(repo.max_turns, max_turns or repo.max_turns)),
-            "--append-system-prompt", rules, "--settings", runner.claude_settings(repo), *runner.CLAUDE_FLAGS,
+            "--append-system-prompt", rules, "--settings", runner.claude_settings(repo), *STEP_FLAGS,
             "--allowedTools", *tools, *(web if tools is not REVIEW_TOOLS else ()),
             "--disallowedTools", *repo.deny_tools, *deny, *(t for t in WEB_TOOLS if t not in repo.allow_tools)]
 
@@ -225,7 +234,7 @@ def run_plan(run: StepRun) -> Result:
     other = [p for p in gitops.changed_files(run.work) if p != PLAN_PATH]
     if other:  # a plan step changes the plan, whatever the tools would have allowed
         return Result("hard-path", reason="the plan step touched other files: " + ", ".join(other[:5]))
-    staged = runner.inspect_staged(run.job, run.repo.protected_paths)
+    staged = runner.inspect_staged(run.job, run.protected)
     if gitops.tree(run.work) == gitops.tree(run.work, start):
         return Result("no-change", head=start)
     if refused := run.refused(staged, title, summary):
@@ -257,7 +266,7 @@ def run_gated(run: StepRun, prompt: str, fixes: int) -> Result:
         result = run.claude(argv, prompt)
         title, summary = runner.split_title(result.get("result", ""), job)
         gitops.git(["reset", "-q", "--soft", start], work)
-        staged = runner.inspect_staged(job, job.repo.protected_paths)
+        staged = runner.inspect_staged(job, run.protected)
         current = gitops.tree(work)
         if current == start_tree:
             return Result("no-change", head=start)

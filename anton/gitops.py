@@ -9,13 +9,15 @@ import subprocess
 import unicodedata
 from pathlib import Path
 
+from . import sandbox
 from .config import BRANCH_PREFIX
 
 # The working tree is attacker-influenced (npm scripts, model output). Never run hooks or
 # fsmonitor programs from it, and ignore system/global git config (no lfs or other filter drivers).
+# XDG_CONFIG_HOME: git also reads ~/.config/git/{ignore,attributes}, and those survive GIT_CONFIG_GLOBAL.
 SAFE_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
               "-c", "protocol.ext.allow=never"]
-ISOLATED_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+ISOLATED_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null"}
 
 # Matched case-insensitively and at ANY depth. A job that touches these fails, nothing is pushed.
 ALWAYS_PROTECTED = (
@@ -122,6 +124,22 @@ def discard_changes(cwd: Path) -> None:
     """Back to the last commit, without files a check left behind. Ignored files stay: they are the installed deps."""
     git(["reset", "-q", "--hard", "HEAD"], cwd)
     git(["clean", "-fdq"], cwd)
+
+
+def exclude_masked(cwd: Path) -> None:
+    """bwrap leaves its mount points in the checkout. Without this, every step would see a change there."""
+    path = cwd / ".git/info/exclude"
+    path.parent.mkdir(exist_ok=True)
+    names = [f"/{n}/" for n in sandbox.MASKED_DIRS] + [f"/{n}" for n in sandbox.MASKED_FILES]
+    with open(path, "a") as f:
+        f.write("".join(f"{n}\n" for n in names))
+
+
+def hidden_instructions(cwd: Path) -> list[str]:
+    """CLAUDE.md files git does not look at. An agent can gitignore one, and a later attempt would obey it."""
+    out = git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+               ":(glob,icase)**/CLAUDE.md", ":(glob,icase)**/CLAUDE.local.md"], cwd)
+    return [p for p in out.split("\0") if p and p not in sandbox.MASKED_FILES]
 
 
 def changed_files(cwd: Path) -> list[str]:

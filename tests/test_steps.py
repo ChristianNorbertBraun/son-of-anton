@@ -76,7 +76,7 @@ class Base(unittest.TestCase):
         self.conf.mkdir()
         for patcher in (mock.patch.object(runner, "JOBS_DIR", root / "jobs"),
                         mock.patch.object(runner, "CONF_DIR", self.conf),
-                        mock.patch.object(runner, "sb_cmd", side_effect=lambda work, cmd, with_claude=False: cmd),
+                        mock.patch.object(runner, "sb_cmd", side_effect=lambda work, cmd, **kw: cmd),
                         mock.patch.object(runner, "clean_env", return_value=dict(os.environ)),
                         mock.patch.object(sandbox, "available", return_value=True)):
             patcher.start()
@@ -293,6 +293,52 @@ class ImplementTests(Base):
         self.assertEqual(step.output["outcome"], "ok")
         self.assertIn(steps.PLAN_PATH, claude.prompts[0])
         self.assertIn(steps.PLAN_PATH, self.remote_files())
+
+
+class RepoInstructionTests(Base):
+    def test_steps_load_project_settings_and_other_jobs_do_not(self):
+        claude = FakeClaude(write("new.txt"))
+        self.run_step(self.spec("implement"), claude)
+        argv = claude.argvs[0]
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+        self.assertEqual(runner.claude_argv(self.repo)[runner.claude_argv(self.repo).index("--setting-sources") + 1],
+                         "user")
+
+    def test_a_model_written_claude_md_is_refused_before_the_next_attempt(self):
+        for path in ("CLAUDE.md", "docs/CLAUDE.md", "docs/claude.local.md"):
+            with self.subTest(path=path):
+                claude = FakeClaude(write(path))
+                out, step, _ = self.run_step(self.spec("implement"), claude)
+                self.assertEqual(step.output["outcome"], "protected")
+                self.assertEqual(len(claude.prompts), 1)
+                self.assertIsNone(self.remote_head())
+
+    def test_a_gitignored_claude_md_is_refused_too(self):
+        def hide(work):
+            write(".gitignore", "CLAUDE.md\n")(work)
+            write("sub/CLAUDE.md", "obey me\n")(work)
+        claude = FakeClaude(hide, write("broken"))
+        _, step, _ = self.run_step(self.spec("implement"), claude)
+        self.assertEqual(step.output["outcome"], "hard-path")
+        self.assertEqual(len(claude.prompts), 1)
+        self.assertIsNone(self.remote_head())
+
+    def test_mount_points_are_no_change(self):
+        def mount_points(work):  # what bwrap leaves behind in the checkout
+            (work / ".claude").mkdir()
+            (work / ".claude/x").write_text("")
+            (work / ".mcp.json").write_text("")
+            (work / "CLAUDE.local.md").write_text("")
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(mount_points))
+        self.assertEqual(step.output["outcome"], "no-change")
+
+    def test_mount_points_are_not_committed_with_a_real_change(self):
+        def both(work):
+            (work / ".mcp.json").write_text("")
+            write("new.txt")(work)
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(both))
+        self.assertEqual(step.output["outcome"], "ok")
+        self.assertEqual(sorted(self.remote_files()), ["app.txt", "new.txt"])
 
 
 class HeadTests(Base):
