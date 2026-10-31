@@ -27,6 +27,19 @@ def bare_repo(root: Path) -> Path:
     return bare
 
 
+def pusher(bare: Path):
+    env = {**os.environ, **IDENTITY}
+
+    def push(branch):
+        tree = subprocess.run(["git", "rev-parse", "main^{tree}"], cwd=bare, env=env, capture_output=True,
+                              text=True, check=True).stdout.strip()
+        sha = subprocess.run(["git", "commit-tree", tree, "-p", "main", "-m", branch], cwd=bare, env=env,
+                             capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "update-ref", f"refs/heads/{branch}", sha], cwd=bare, env=env, check=True)
+        return sha
+    return push
+
+
 class LocalConformance(Contract, unittest.TestCase):
     def make(self):
         tmp = tempfile.TemporaryDirectory()
@@ -34,18 +47,9 @@ class LocalConformance(Contract, unittest.TestCase):
         root = Path(tmp.name)
         bare = bare_repo(root)
         tracker, host = LocalTracker(root), LocalCodeHost(root, bare)
-        env = {**os.environ, **IDENTITY}
-
-        def push(branch):
-            tree = subprocess.run(["git", "rev-parse", "main^{tree}"], cwd=bare, env=env, capture_output=True,
-                                  text=True, check=True).stdout.strip()
-            sha = subprocess.run(["git", "commit-tree", tree, "-p", "main", "-m", branch], cwd=bare, env=env,
-                                 capture_output=True, text=True, check=True).stdout.strip()
-            subprocess.run(["git", "update-ref", f"refs/heads/{branch}", sha], cwd=bare, env=env, check=True)
-            return sha
-        owner = SimpleNamespace(add=tracker.owner_add, close=tracker.owner_close, push=push, review=host.owner_review,
-                                note=host.owner_note, merge=host.owner_merge, comments=host.comments,
-                                task_comments=tracker.comments, task_state=tracker.state_of,
+        owner = SimpleNamespace(add=tracker.owner_add, close=tracker.owner_close, push=pusher(bare),
+                                review=host.owner_review, note=host.owner_note, merge=host.owner_merge,
+                                comments=host.comments, task_comments=tracker.comments, task_state=tracker.state_of,
                                 pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]))
         return tracker, host, owner
 
