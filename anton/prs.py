@@ -6,9 +6,9 @@ import re
 from dataclasses import dataclass
 
 from .config import RepoConfig
+from .workflows import FLOW_BRANCH_PREFIX
 
 SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,100}")
-FLOW_BRANCH_PREFIX = "anton/flow-"
 
 
 def _flat(text, limit: int) -> str:

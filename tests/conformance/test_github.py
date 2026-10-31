@@ -5,7 +5,7 @@ from unittest import mock
 
 from anton.adapters.github import GitHubCodeHost, GitHubTracker
 from anton.github import PERMISSIONS, GitHub
-from anton.ports import PrRef
+from anton.ports import PrRef, marked
 from fake_github import FakeGitHub
 
 from .kit import Contract
@@ -13,7 +13,7 @@ from .kit import Contract
 
 def clients(fake):
     gh = GitHub(1, Path("/nonexistent"), mock.Mock(slug=fake.slug, installation_id=1), api=fake.api, mint=fake.mint)
-    return GitHubTracker(gh), GitHubCodeHost(gh)
+    return GitHubTracker(gh, fake.bot), GitHubCodeHost(gh, fake.bot)
 
 
 class GitHubConformance(Contract, unittest.TestCase):
@@ -22,7 +22,8 @@ class GitHubConformance(Contract, unittest.TestCase):
         tracker, host = clients(fake)
         return tracker, host, SimpleNamespace(
             add=fake.add_issue, close=fake.close_issue, push=fake.push, review=fake.add_review, note=fake.add_note,
-            merge=fake.merge, comments=fake.comments_of, task_comments=fake.task_comments, task_state=fake.task_state)
+            merge=fake.merge, comments=fake.comments_of, task_comments=fake.task_comments, task_state=fake.task_state,
+            pr_text=fake.pr_text)
 
 
 class GitHubSpecificTests(unittest.TestCase):
@@ -33,6 +34,41 @@ class GitHubSpecificTests(unittest.TestCase):
     def opened(self):
         self.fake.push("anton/flow-a")
         return self.host.open_draft_pr("anton/flow-a", "main", "T", "B")
+
+    def test_a_strangers_pull_request_on_the_flow_branch_is_never_adopted(self):
+        self.fake.push("anton/flow-a")
+        foreign = self.fake.add_foreign_pull("anton/flow-a")
+        pr = self.host.open_draft_pr("anton/flow-a", "main", "T", "B")
+        self.assertNotEqual(pr.number, foreign)
+        self.assertTrue(self.fake.pulls[pr.number]["draft"])
+
+    def test_a_pull_request_of_ours_to_another_base_or_from_a_fork_is_not_the_flows(self):
+        self.fake.push("anton/flow-a")
+        other_base = self.fake.add_foreign_pull("anton/flow-a", author=self.fake.bot, base="develop")
+        fork = self.fake.add_foreign_pull("anton/flow-a", author=self.fake.bot, head_repo="fork/repo")
+        self.assertNotIn(self.host.open_draft_pr("anton/flow-a", "main", "T", "B").number, (other_base, fork))
+
+    def test_a_forged_marker_does_not_swallow_a_comment(self):
+        self.fake.add_issue("1")
+        self.fake.add_foreign_comment("1", marked("forged", "f1-9"))
+        self.tracker.report("1", "blocked", "Real reason", "f1-9")
+        self.assertTrue(any("Real reason" in c for c in self.fake.task_comments("1")))
+        pr = self.opened()
+        self.fake.add_foreign_comment(pr.number, marked("forged", "f1-8"))
+        self.host.comment(pr, "Real note", "f1-8")
+        self.assertTrue(any("Real note" in c for c in self.fake.comments_of(pr)))
+
+    def test_a_review_keeps_the_commit_it_was_written_on(self):
+        pr = self.opened()
+        self.fake.add_review(pr, "owner", "approved", "a" * 40)
+        self.fake.push("anton/flow-a")
+        self.assertEqual(self.host.pr_state(pr).reviews[0].commit, "a" * 40)
+        self.assertNotEqual(self.host.pr_state(pr).head, "a" * 40)
+
+    def test_at_the_event_cap_the_label_actor_is_unknown(self):
+        self.fake.add_issue("1")
+        self.fake.issues[1]["_events"] *= 501
+        self.assertIsNone(self.tracker.list_ready()[0].label_actor)
 
     def test_a_pull_request_is_no_task(self):
         self.fake.add_issue("1")

@@ -123,10 +123,15 @@ class FlowDb:
             return [from_dict(json.loads(r["data"])) for r in c.execute(
                 "SELECT data FROM flows ORDER BY updated DESC, id LIMIT ?", (limit,))]
 
-    def commit(self, before: Flow, after: Flow, actions: list[Action], event: Event) -> None:
-        """The transition, its actions and the history line: all of it or none."""
+    def commit(self, before: Flow, after: Flow, actions: list[Action], event: Event,
+               abandon: str | None = None) -> None:
+        """The transition, its actions and the history line: all of it or none. `abandon` closes what was left in
+        the outbox, in the same transaction, so no crash can leave a flow with neither a job nor a way to get one."""
         now = self._now()
         with self._tx() as c:
+            if abandon is not None:
+                c.execute("UPDATE outbox SET finished=?, error=? WHERE flow_id=? AND finished IS NULL",
+                          (now, abandon, after.id))
             c.execute("UPDATE flows SET state=?, data=?, updated=? WHERE id=?",
                       (after.state, json.dumps(to_dict(after)), now, after.id))
             for action in actions:
@@ -148,21 +153,15 @@ class FlowDb:
             return c.execute("SELECT 1 FROM outbox WHERE flow_id=? AND finished IS NULL LIMIT 1",
                              (flow_id,)).fetchone() is not None
 
-    def finish(self, action_id: int) -> None:
+    def finish(self, action_id: int, error: str | None = None) -> None:
         with self._conn() as c:
-            c.execute("UPDATE outbox SET finished=?, error=NULL WHERE id=?", (self._now(), action_id))
+            c.execute("UPDATE outbox SET finished=?, error=? WHERE id=?", (self._now(), error, action_id))
 
     def postpone(self, action_id: int, delay: int, error: str, charge: bool = True) -> None:
         """Try again later. `charge`: False for waiting that says nothing about the action (a daily limit)."""
         with self._conn() as c:
             c.execute("UPDATE outbox SET not_before=?, error=?, tries=tries+? WHERE id=?",
                       (self._now() + delay, error, 1 if charge else 0, action_id))
-
-    def abandon(self, flow_id: str, error: str) -> None:
-        """Close what is left of a flow's outbox: nothing of it may run after the flow stopped."""
-        with self._conn() as c:
-            c.execute("UPDATE outbox SET finished=?, error=? WHERE flow_id=? AND finished IS NULL",
-                      (self._now(), error, flow_id))
 
     def record_run(self, flow_id: str, stage: str, job: int, job_id: str | None, result: str, usage: dict,
                    started: int | None, finished: int | None) -> None:
@@ -184,8 +183,13 @@ class FlowDb:
         with self._conn() as c:
             c.execute("INSERT INTO commands (flow_id, kind, created) VALUES (?,?,?)", (flow_id, kind, self._now()))
 
-    def take_commands(self) -> list[tuple[str, str]]:
-        with self._tx() as c:
-            rows = c.execute("SELECT id, flow_id, kind FROM commands WHERE taken IS NULL ORDER BY id").fetchall()
-            c.execute("UPDATE commands SET taken=? WHERE taken IS NULL", (self._now(),))
-        return [(r["flow_id"], r["kind"]) for r in rows]
+    def commands(self) -> list[tuple[int, str, str]]:
+        """What the owner asked for and has not happened yet: (id, flow, kind)."""
+        with self._conn() as c:
+            return [(r["id"], r["flow_id"], r["kind"]) for r in c.execute(
+                "SELECT id, flow_id, kind FROM commands WHERE taken IS NULL ORDER BY id")]
+
+    def take_command(self, command_id: int) -> None:
+        """Only once it has happened: a command must survive a crash and an outage."""
+        with self._conn() as c:
+            c.execute("UPDATE commands SET taken=? WHERE id=?", (self._now(), command_id))

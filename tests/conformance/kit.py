@@ -2,7 +2,8 @@
 
 A subclass mixes this into unittest.TestCase and implements `make()`, which returns (tracker, host, owner). `owner`
 plays the people on the other side: add(key, ...), close(key, actor), push(branch) -> sha, review(pr, actor, state,
-commit, text), note(pr, actor, text, commit), merge(pr), comments(pr), task_comments(key), task_state(key)."""
+commit, text), note(pr, actor, text, commit), merge(pr), comments(pr), task_comments(key), task_state(key),
+pr_text(pr) -> (title, body)."""
 from anton.ports import AdapterError, PrRef
 
 
@@ -85,6 +86,14 @@ class Contract:
         sha = self.owner.push("anton/flow-a")
         self.assertEqual(self.host.head_of("anton/flow-a"), sha)
 
+    def test_pr_for_finds_the_flows_own_and_nothing_else(self):
+        self.assertIsNone(self.host.pr_for("anton/flow-a", "main"))
+        pr, _ = self.opened()
+        self.assertEqual(self.host.pr_for("anton/flow-a", "main").number, pr.number)
+        self.assertIsNone(self.host.pr_for("anton/flow-a", "develop"))
+        self.host.close(pr)
+        self.assertEqual(self.host.pr_for("anton/flow-a", "main").number, pr.number)
+
     def test_a_new_pull_request_is_a_draft(self):
         pr, sha = self.opened()
         state = self.host.pr_state(pr)
@@ -93,6 +102,12 @@ class Contract:
     def test_a_replayed_open_returns_the_same_pull_request(self):
         pr, _ = self.opened()
         self.assertEqual(self.host.open_draft_pr("anton/flow-a", "main", "Title", "Body").number, pr.number)
+
+    def test_update_changes_title_and_body(self):
+        pr, _ = self.opened()
+        self.host.update_pr(pr, "New title", "New body")
+        self.host.update_pr(pr, "New title", "New body")
+        self.assertEqual(self.owner.pr_text(pr), ("New title", "New body"))
 
     def test_mark_ready_can_be_repeated(self):
         pr, _ = self.opened()

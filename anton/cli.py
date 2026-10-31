@@ -190,8 +190,8 @@ def cmd_conduct(a: argparse.Namespace) -> int:
         return 3
     q = open_queue(settings)
     gh_for = github_factory(settings)
-    c = conductor.Conductor(FlowDb(FLOW_DB_PATH), q, Service(q, settings.repos), settings, conductor.github_ports(gh_for),
-                            conductor.policy_for(settings, tuple(CLIENTS)))
+    c = conductor.Conductor(FlowDb(FLOW_DB_PATH), q, Service(q, settings.repos), settings,
+                            conductor.github_ports(gh_for, settings.github.bot_name), conductor.policy_for(settings, tuple(CLIENTS)))
     repos = [r.slug for r in settings.repos.values() if r.tracker]
     print(f"anton conduct: every {settings.daemon.poll_seconds}s on {', '.join(repos) or 'no repo'}", flush=True)
     stop = threading.Event()

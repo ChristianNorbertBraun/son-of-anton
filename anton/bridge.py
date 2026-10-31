@@ -305,6 +305,8 @@ class Bridge:
         current = gh.issue(number)
         if "pull_request" in current:
             raise ValueError("that is a pull request: use anton_comment or anton_update_pr")
+        if is_flow_issue(x.get("name", "") for x in current.get("labels") or []):  # its text is a work order
+            raise ValueError("that issue belongs to a flow: use anton_comment")
         fields: dict = {}
         if title is not None:
             fields["title"] = one_line(title)

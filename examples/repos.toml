@@ -75,7 +75,9 @@ allow_tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 -m unittes
                "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "WebSearch", "WebFetch"]
 protected_paths = ["anton/sandbox.py", "anton/config.py", "anton/gitops.py", "anton/ghapp.py",
                    "anton/runner.py", "anton/selftest.py", "anton/tripwire.py", "anton/steps.py",
-                   "anton/flow.py", "anton/conductor.py", "anton/prs.py"]
+                   "anton/flow.py", "anton/conductor.py", "anton/prs.py", "anton/poller.py", "anton/github.py",
+                   "anton/workflows.py", "anton/ports.py", "anton/flowdb.py", "anton/bridge.py", "anton/queue.py",
+                   "anton/adapters/*"]
 allowed_authors = ["your-github-login"]
 trigger_label = "anton"
 

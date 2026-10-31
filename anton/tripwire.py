@@ -4,6 +4,7 @@ common tokens and private keys. Findings name the kind and the file, never the v
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 MIN_SECRET = 12  # shorter values are not secrets (a chat id, a port) and would only cause false alarms
@@ -70,6 +71,8 @@ def added_lines(patch: str) -> list[tuple[str, str]]:
 
 def _kinds(text: str, values: list[str], private: list[str]) -> list[str]:
     text = text.replace("\0", "")  # a UTF-16 file, seen as text
+    if not text.isascii():  # a zero-width character must not split a value
+        text = "".join(c for c in text if unicodedata.category(c) != "Cf")
     kinds = [kind for kind, shape in SHAPES if shape.search(text)]
     if any(value in text for value in values):
         kinds.append("a stored secret")

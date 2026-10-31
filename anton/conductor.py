@@ -6,6 +6,7 @@ action. An action can run twice after a crash, so each one is idempotent. Everyt
 `outbound` first. A flow writes to GitHub by itself, and no person looks at the text before it is public."""
 from __future__ import annotations
 
+import re
 import secrets
 import sys
 import threading
@@ -25,6 +26,7 @@ from .workflows import LABEL_PREFIX, flow_label
 
 STALL_MARGIN = 15 * 60  # a step ends by itself after STEP_SECONDS: past this one, nothing is watching it any more
 MAX_TRIES = 6
+OUTAGE_RE = re.compile(r": (?:429|5\d\d) |rate limit", re.I)
 MAX_PASSES = 50  # actions of one flow run in order: one pass per action, or a start would take several ticks
 BASE_DELAY = 60
 LIMIT_DELAY = 300  # a daily limit or a full queue is waiting, not failing
@@ -35,14 +37,19 @@ class Refused(Exception):
     """Text that may not be published. The message names kind and place, never the value."""
 
 
-def github_ports(gh_for) -> Ports:
+def github_ports(gh_for, bot: str) -> Ports:
     from .adapters.github import GitHubCodeHost, GitHubTracker
 
     def ports(repo: RepoConfig):
         gh = gh_for(repo)
-        return GitHubTracker(gh), GitHubCodeHost(gh)
+        return GitHubTracker(gh, bot), GitHubCodeHost(gh, bot)
 
     return ports
+
+
+def outage(error: Exception) -> bool:
+    """GitHub being away says nothing about the action: waiting costs no try, however long it takes."""
+    return isinstance(error, OSError) or bool(OUTAGE_RE.search(str(error)))
 
 
 def policy_for(settings: Settings, chat_clients: tuple[str, ...]) -> Callable[[RepoConfig], Policy]:
@@ -92,10 +99,10 @@ class Conductor:
     def repo_of(self, flow: Flow) -> RepoConfig:
         return self.settings.repos[flow.repo]
 
-    def apply(self, flow: Flow, event: Event) -> Flow:
+    def apply(self, flow: Flow, event: Event, abandon: str | None = None) -> Flow:
         after, actions = step(flow, event, self.policy(self.repo_of(flow)))
-        if after != flow or actions:
-            self.db.commit(flow, after, actions, event)
+        if after != flow or actions or abandon:
+            self.db.commit(flow, after, actions, event, abandon)
             if after.state != flow.state:
                 self.log(f"flow {flow.id}: {flow.state} -> {after.state} ({event.kind})")
         return after
@@ -103,19 +110,24 @@ class Conductor:
     # --- what the owner asked for
 
     def run_commands(self) -> None:
-        for flow_id, kind in self.db.take_commands():
-            flow = self.db.get(flow_id)
-            if flow is None or flow.terminal:
-                continue
-            if kind == "cancel":
-                self.apply(flow, Event("cancel"))
-            elif kind == "retry" and flow.kind == "blocked":
-                job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
-                if job is not None and job.status in ACTIVE:  # two attempts never run at once
-                    self.db.add_command(flow_id, kind)
-                    continue
-                _, host = self.ports(self.repo_of(flow))
-                self.apply(flow, Event("retry", head=host.head_of(flow.branch)))
+        for command_id, flow_id, kind in self.db.commands():
+            self.isolated(f"command {command_id}", lambda c=command_id, f=flow_id, k=kind: self.run_command(c, f, k))
+
+    def run_command(self, command_id: int, flow_id: str, kind: str) -> None:
+        flow = self.db.get(flow_id)
+        if flow is None or flow.terminal or flow.repo not in self.settings.repos:
+            self.db.take_command(command_id)
+            return
+        _, host = self.ports(self.repo_of(flow))
+        if kind == "cancel":
+            pr = host.pr_state(PrRef(flow.pr)) if flow.pr else None
+            self.apply(flow, Event("pr_merged" if pr is not None and pr.merged else "cancel"))  # merged wins
+        elif kind == "retry" and flow.kind == "blocked":
+            job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
+            if job is not None and job.status in ACTIVE:
+                return  # two attempts never run at once: the command stays until this one has ended
+            self.apply(flow, Event("retry", head=host.head_of(flow.branch)))
+        self.db.take_command(command_id)
 
     # --- new flows
 
@@ -153,15 +165,19 @@ class Conductor:
             if flow.terminal:
                 return
         tracker, host = self.ports(self.repo_of(flow))
-        task = tracker.get(flow.key)
         pr = host.pr_state(PrRef(flow.pr)) if flow.pr else None
+        try:
+            task = tracker.get(flow.key)
+        except AdapterError:  # a deleted issue must not hide what happened to the pull request
+            task = None
         event = close_event(flow, pr, task)
-        if event:
-            self.apply(flow, event)
-            return
-        if flow.kind != "awaiting-gate" or pr is None or self.db.has_open(flow.id):
+        if event and self.apply(flow, event) != flow:
+            return  # a close the core ignored must not stop the gate below
+        if flow.kind != "awaiting-gate" or self.db.has_open(flow.id):
             return  # a gate looks at the pull request only after everything that leads to it has happened
-        if pr.head != flow.head:
+        if pr is None:
+            self.apply(flow, Event("effect_failed", text="the flow is at a gate without a pull request"))
+        elif pr.head != flow.head:
             self.apply(flow, Event("head_moved", commit=pr.head))
         elif flow.stage == "gate:plan":
             event = gate_event(flow, pr, self.policy(self.repo_of(flow)))
@@ -171,15 +187,20 @@ class Conductor:
     def read_job(self, flow: Flow) -> Flow:
         job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
         if job is None:
-            if flow.kind == "cancelling" and not self.db.has_open(flow.id):  # it never got as far as a job
+            if self.db.has_open(flow.id):
+                return flow  # the submit is still in the outbox
+            if flow.kind == "cancelling":  # it never got as far as a job
                 return self.apply(flow, Event("step_finished", job=flow.jobs, result="cancelled"))
-            return flow  # the submit is still in the outbox
+            return self.apply(flow, Event("effect_failed", text=f"step {flow.stage} never got a job"))
         if job.status in FINAL:
             return self.apply(flow, self.finished(flow, job))
         # only a running job can stall: a queued one is waiting its turn, and costs nothing
-        if flow.kind == "running" and job.status == "running" and job.started is not None \
-                and self.clock() - job.started > STEP_SECONDS + STALL_MARGIN:
-            return self.apply(flow, Event("stall_detected"))
+        if flow.kind == "running" and job.status == "running" and job.started is not None:
+            age = self.clock() - job.started
+            if flow.stalled and age > STEP_SECONDS + 2 * STALL_MARGIN:  # the cancel did not reach it either
+                return self.apply(flow, Event("effect_failed", text="the job does not end: restart `anton serve`"))
+            if age > STEP_SECONDS + STALL_MARGIN:
+                return self.apply(flow, Event("stall_detected"))
         return flow
 
     def finished(self, flow: Flow, job: JobRow) -> Event:
@@ -209,41 +230,53 @@ class Conductor:
 
     def run_action(self, action: Pending) -> None:
         flow = self.db.get(action.flow_id)
+        if flow.repo not in self.settings.repos:  # taken out of the config: nothing can run until it is back
+            self.db.postpone(action.id, LIMIT_DELAY, "the repo is not in the config", charge=False)
+            return
         try:
             self.effect(flow, action)
         except LimitError as e:
             self.db.postpone(action.id, LIMIT_DELAY, safe(e), charge=False)
         except Refused as e:
-            self.give_up(flow, f"nothing was published: {e}")
+            self.give_up(action, f"nothing was published: {e}")
         except InputError as e:
-            self.give_up(flow, f"the step was refused: {safe(e, 200)}")
+            self.give_up(action, f"the step was refused: {safe(e, 200)}")
         except Exception as e:
-            if action.tries + 1 >= MAX_TRIES:
-                self.give_up(flow, f"{action.kind} failed {MAX_TRIES} times: {safe(e, 200)}")
+            if outage(e):
+                self.db.postpone(action.id, LIMIT_DELAY, safe(e, 300), charge=False)
+            elif action.tries + 1 >= MAX_TRIES:
+                self.give_up(action, f"{action.kind} failed {MAX_TRIES} times: {safe(e, 200)}")
             else:
                 self.db.postpone(action.id, BASE_DELAY * 2 ** action.tries, safe(e, 300))
         else:
             self.db.finish(action.id)
 
-    def give_up(self, flow: Flow, reason: str) -> None:
-        self.db.abandon(flow.id, reason[:300])
-        self.apply(flow, Event("effect_failed", text=reason))
+    def give_up(self, action: Pending, reason: str) -> None:
+        """A flow that has stopped keeps what is left in its outbox: closing its PR or showing it as blocked is still
+        wanted. One that was moving stops here. The flow is read again: an action may have changed it."""
+        flow = self.db.get(action.flow_id)
+        if flow.terminal or flow.kind in ("blocked", "cancelling"):
+            self.log(f"flow {flow.id}: gave up on {action.kind}: {safe(reason, 200)}")
+            self.db.finish(action.id, reason[:300])
+        else:
+            self.apply(flow, Event("effect_failed", text=reason), abandon=reason[:300])
 
     def outbound(self, flow: Flow, text: str, where: str) -> str:
-        """Model text cannot notify people or close issues, and nothing private leaves through it."""
-        text = neutralize(text)
+        """Model text cannot notify people or close issues, and nothing private leaves through it. The scan comes
+        first: neutralize also redacts tokens, and a token must stop the post, not go out redacted."""
         repo = self.repo_of(flow)
         private = tripwire.private_strings(runner.CONF_DIR) if repo.private_check else []
         hits = tripwire.scan_text(text, where, tripwire.secret_values(runner.CONF_DIR), private)
         if hits:
             raise Refused(", ".join(hits))
-        return text
+        return neutralize(text)
 
     def pr_title(self, flow: Flow, title: str) -> str:
         return self.outbound(flow, f"Anton: {title or f'Work on issue {flow.key}'}", "the title of the pull request")
 
     def pr_body(self, flow: Flow, payload: dict) -> str:
         summary = self.outbound(flow, payload.get("summary") or "", "the body of the pull request")
+        summary = summary.replace("<!--", "&lt;!--")  # an open comment would hide the real checks below it
         gates = self.outbound(flow, "\n".join(payload.get("gates") or ["- not run yet"]), "the checks of the pull request")
         return (f"{f'Closes #{flow.key}' if flow.key.isdigit() else f'Task {flow.key}'}\n\n## Summary\n\n{summary}\n\n"
                 f"## Checks\n\n{gates}\n\n---\nDraft by Son of Anton, flow `{flow.id}`. Review before merging; "
@@ -261,11 +294,23 @@ class Conductor:
             self.service.submit_step(flow.repo, f"Flow {flow.id}: {p['step_id']}", flow.id, p["step_id"], p["attempt"],
                                      p["spec"])
         elif action.kind == "open_pr":
+            if flow.terminal:
+                # an attempt that looked failed may have opened it after all, and nobody else knows about it
+                found = host.pr_for(flow.branch, flow.base) if flow.state == "cancelled" else None
+                if found:
+                    host.close(found)
+                return
             pr = host.open_draft_pr(flow.branch, flow.base, self.pr_title(flow, action.payload.get("title") or ""),
                                     self.pr_body(flow, action.payload))
             flow = self.apply(flow, Event("pr_opened", number=pr.number))
             tracker.link(flow.key, f"Draft pull request: {pr.url}", action.marker)
         elif action.kind == "mark_ready":
+            if flow.terminal:
+                return
+            if ref is None:
+                raise RuntimeError("no pull request to mark ready")
+            host.update_pr(ref, self.pr_title(flow, action.payload.get("title") or ""),  # it says what was planned
+                           self.pr_body(flow, action.payload))
             host.mark_ready(ref)
         elif action.kind == "report":
             self.report(flow, tracker, action)
@@ -274,7 +319,7 @@ class Conductor:
             if ref:
                 host.comment(ref, text, action.marker)
             else:
-                tracker.report(flow.key, "running", text, action.marker)
+                tracker.link(flow.key, text, action.marker)
         elif action.kind == "cancel_job":
             job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
             if job is not None:

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Callable
 
 from .ports import PrState, Task
-from .workflows import WORKFLOWS
+from .workflows import FLOW_BRANCH_PREFIX, WORKFLOWS
 
 TERMINAL = ("done", "cancelled")
 STATE_KINDS = ("queued", "running", "awaiting-gate", "blocked", "cancelling", "done", "cancelled")
@@ -18,9 +18,9 @@ EVENT_KINDS = ("start", "step_finished", "gate_passed", "gate_rejected", "pr_ope
                "issue_closed", "head_moved", "stall_detected", "retry", "cancel", "effect_failed")
 MAX_REVISIONS = 3
 MAX_RETRIES = 1  # a failed step, a stalled one: once more, then the owner
-RETRY_DELAYS = (60, 300)  # seconds before a retry, by retries used
+MAX_RESTARTS = 5  # a restart costs no attempt, but a step that kills its worker must not run all day
+RETRY_DELAY = 60  # seconds
 BLOCKING_SEVERITIES = ("high", "medium")
-BRANCH_PREFIX = "anton/flow-"
 
 
 @dataclass(frozen=True)
@@ -62,13 +62,15 @@ class Flow:
     feedback: str = ""
     findings: tuple[dict, ...] = ()
     stalled: bool = False
+    foreign_head: bool = False  # the branch has a head this flow did not push: only then retry adopts one
+    restarts: int = 0
     title: str = ""
     summary: str = ""
     gates: tuple[str, ...] = ()
 
     @property
     def branch(self) -> str:
-        return f"{BRANCH_PREFIX}{self.id}"
+        return f"{FLOW_BRANCH_PREFIX}{self.id}"
 
     @property
     def kind(self) -> str:
@@ -132,13 +134,16 @@ def submit(flow: Flow, stage: str, delay: int = 0) -> tuple[Flow, list[Action]]:
             [Action("submit_step", {"step_id": stage, "attempt": jobs, "spec": spec}, delay)])
 
 
+def pr_text(flow: Flow) -> dict:
+    return {"title": flow.title, "summary": flow.summary, "gates": list(flow.gates)}
+
+
 def enter(flow: Flow, stage: str | None) -> tuple[Flow, list[Action]]:
     """Move to a stage. `pr` and `ready` are actions, not states: the outbox carries them through a crash."""
     if stage == "pr":
-        return _then(flow, stage, Action("open_pr", {"title": flow.title, "summary": flow.summary,
-                                                     "gates": list(flow.gates)}))
+        return _then(flow, stage, Action("open_pr", pr_text(flow)))
     if stage == "ready":
-        return _then(flow, stage, Action("mark_ready"))
+        return _then(flow, stage, Action("mark_ready", pr_text(flow)))
     if stage in ("gate:plan", "gate:merge"):
         gate = stage.split(":", 1)[1]
         label = "awaiting-plan-review" if gate == "plan" else "pr"
@@ -213,8 +218,7 @@ def on_pr_opened(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[A
 def retry_or_block(flow: Flow, reason: str) -> tuple[Flow, list[Action]]:
     if flow.retries >= MAX_RETRIES:
         return block(flow, reason)
-    delay = RETRY_DELAYS[min(flow.retries, len(RETRY_DELAYS) - 1)]
-    return submit(replace(flow, retries=flow.retries + 1), flow.stage, delay)
+    return submit(replace(flow, retries=flow.retries + 1), flow.stage, RETRY_DELAY)
 
 
 def has_blocking_findings(findings: tuple[dict, ...]) -> bool:
@@ -224,9 +228,9 @@ def has_blocking_findings(findings: tuple[dict, ...]) -> bool:
 def on_ok(flow: Flow, event: Event) -> tuple[Flow, list[Action]]:
     stage = flow.stage
     flow = replace(flow, retries=0, head=event.head or flow.head)
+    flow = replace(flow, gates=event.gates or flow.gates)
     if stage in ("plan", "revise", "implement"):
-        flow = replace(flow, title=event.title or flow.title, summary=event.summary or flow.summary,
-                       gates=event.gates or flow.gates)
+        flow = replace(flow, title=event.title or flow.title, summary=event.summary or flow.summary)
     if stage == "review" and has_blocking_findings(event.findings):
         return submit(replace(flow, findings=event.findings), "fix")
     return enter(flow, next_stage(flow, stage))
@@ -240,7 +244,9 @@ def on_step_finished(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
     if stalled and result == "cancelled":  # the conductor cancelled it, not the owner
         return retry_or_block(flow, "the step stalled")
     if result == "restarted":  # the daemon's fault: costs no attempt
-        return submit(flow, stage)
+        if flow.restarts >= MAX_RESTARTS:
+            return block(flow, f"step {stage} was interrupted {MAX_RESTARTS + 1} times")
+        return submit(replace(flow, restarts=flow.restarts + 1), stage)
     if result == "ok":
         return on_ok(flow, event)
     if result == "no-change" and stage in ("fix", "cleanup"):
@@ -253,6 +259,8 @@ def on_step_finished(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
         return retry_or_block(flow, f"step {stage} left no readable result")
     if result == "cancelled":  # any chat client can cancel a job id, and a job cancel has no verified actor
         return block(flow, f"the job of step {stage} was cancelled")
+    if result == "unknown-head":
+        flow = replace(flow, foreign_head=True)
     return block(flow, f"step {stage} ended with {result}" + (f": {event.text}" if event.text else ""))
 
 
@@ -273,12 +281,14 @@ def on_gate_rejected(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
         return flow, []
     if flow.revisions >= MAX_REVISIONS:
         return block(flow, f"the plan was rejected {MAX_REVISIONS + 1} times")
-    return submit(replace(flow, revisions=flow.revisions + 1, feedback=event.text), "revise")
+    flow, actions = submit(replace(flow, revisions=flow.revisions + 1, feedback=event.text), "revise")
+    return flow, [report("running"), *actions]
 
 
 def on_head_moved(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
     # a push has no verified actor: only `anton flow retry` adopts it
-    return block(flow, "the branch has a head this flow does not know; `anton flow retry` adopts it")
+    return block(replace(flow, foreign_head=True),
+                 "the branch has a head this flow does not know; `anton flow retry` adopts it")
 
 
 def on_stall(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
@@ -292,15 +302,29 @@ def on_effect_failed(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
     return flow, [*running, *actions]
 
 
+def repairs(flow: Flow) -> list[Action]:
+    """A failed action left the outbox: past its stage, a flow may have no pull request or a draft that should be ready."""
+    stages = WORKFLOWS[flow.workflow].stages
+    past_pr = flow.stage in ("revise", "fix") or (flow.stage in stages and stages.index(flow.stage) > stages.index("pr"))
+    return ([Action("open_pr", pr_text(flow))] if past_pr and flow.pr is None else []) + (
+        [Action("mark_ready", pr_text(flow))] if flow.stage == "gate:merge" else [])
+
+
 def on_retry(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
-    flow = replace(flow, retries=0, revisions=0, reason="", head=event.head or flow.head)
-    if flow.stage.startswith("gate:"):
-        # a failed action left the outbox, so a gate may have no pull request, or a draft that should be ready
-        repair = [Action("open_pr", {"title": flow.title, "summary": flow.summary, "gates": list(flow.gates)})
-                  if flow.pr is None else Action("mark_ready")] if flow.pr is None or flow.stage == "gate:merge" else []
-        flow, actions = enter(flow, flow.stage)
-        return flow, [*repair, *actions]
-    return submit(flow, flow.stage)
+    """Adopts a head only if an unknown head is what stopped the flow: a retry for failed gates must not take over
+    a push nobody looked at. An adopted head before `implement` may have changed the plan: it needs approval again."""
+    adopted = flow.foreign_head and event.head is not None
+    stage = flow.stage
+    if adopted and stage == "implement" and "gate:plan" in WORKFLOWS[flow.workflow].stages:
+        stage = "gate:plan"
+    flow = replace(flow, retries=0, revisions=0, restarts=0, reason="", foreign_head=False, stage=stage,
+                   head=event.head if adopted else flow.head)
+    fixes = repairs(flow)
+    if stage.startswith("gate:"):
+        flow, actions = enter(flow, stage)
+        return flow, [*fixes, *actions]
+    flow, actions = submit(flow, stage)
+    return flow, [*fixes, report("running"), *actions]
 
 
 Handler = Callable[[Flow, Event, Policy], "tuple[Flow, list[Action]]"]
@@ -323,8 +347,7 @@ TABLE: dict[str, dict[str, Handler]] = {
                    "issue_closed": IGNORE, "head_moved": IGNORE, "stall_detected": IGNORE, "retry": IGNORE,
                    "cancel": IGNORE, "effect_failed": IGNORE},
     "done": {kind: IGNORE for kind in EVENT_KINDS},
-    # merged wins: a close seen first must not turn a merge into a cancelled flow
-    "cancelled": {**{kind: IGNORE for kind in EVENT_KINDS}, "pr_merged": on_merged},
+    "cancelled": {kind: IGNORE for kind in EVENT_KINDS},
 }
 
 
@@ -356,13 +379,13 @@ def feedback(flow: Flow, pr: PrState, policy: Policy) -> str:
     return "\n\n".join(texts)
 
 
-def close_event(flow: Flow, pr: PrState | None, task: Task) -> Event | None:
+def close_event(flow: Flow, pr: PrState | None, task: Task | None) -> Event | None:
     """Read the pull request first: merged wins, so `Closes #N` cannot turn a merge into `cancelled`."""
     if pr is not None and pr.merged:
         return Event("pr_merged")
     if pr is not None and pr.state == "closed":
         return Event("pr_closed")
-    if task.state == "closed":
+    if task is not None and task.state == "closed":
         return Event("issue_closed", actor=task.closed_by)
     return None
 

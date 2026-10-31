@@ -45,7 +45,8 @@ class LocalConformance(Contract, unittest.TestCase):
             return sha
         owner = SimpleNamespace(add=tracker.owner_add, close=tracker.owner_close, push=push, review=host.owner_review,
                                 note=host.owner_note, merge=host.owner_merge, comments=host.comments,
-                                task_comments=tracker.comments, task_state=tracker.state_of)
+                                task_comments=tracker.comments, task_state=tracker.state_of,
+                                pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]))
         return tracker, host, owner
 
 

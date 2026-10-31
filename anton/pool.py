@@ -23,6 +23,7 @@ class Pool:
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._stopping = False
+        self._stop: threading.Event | None = None
 
     def tick(self) -> int:
         """Start as many queued jobs as capacity allows. Returns how many were started."""
@@ -57,12 +58,20 @@ class Pool:
     def _work(self, row: JobRow) -> None:
         try:
             out = self.run_fn(row, lambda: self.queue.is_cancel_requested(row.id))
-            self._finish(row, out.status, out.pr, out.reason, out.answer)
+            if not self._interrupted(row):
+                self._finish(row, out.status, out.pr, out.reason, out.answer)
         except Exception as e:
-            self._finish(row, "failed", None, f"{type(e).__name__}: {e}"[:300])
+            if not self._interrupted(row):
+                self._finish(row, "failed", None, f"{type(e).__name__}: {e}"[:300])
         self._emit("finished", row)
 
+    def _interrupted(self, row: JobRow) -> bool:
+        """The stop signal may have killed what a step ran, so its result says nothing about the work. The row stays
+        running: the next start marks it as restarted, which costs the flow no attempt."""
+        return row.kind == "step" and self._stop is not None and self._stop.is_set()
+
     def run_forever(self, stop: threading.Event, interval: float = 2.0) -> None:
+        self._stop = stop
         while not stop.is_set():
             try:
                 self.tick()

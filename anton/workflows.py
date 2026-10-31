@@ -18,6 +18,7 @@ WORKFLOWS = {w.name: w for w in (
     Workflow("standard", ("plan", "pr", "gate:plan", "implement", "review", "cleanup", "ready", "gate:merge")),
 )}
 LABEL_PREFIX = "flow:"
+FLOW_BRANCH_PREFIX = "anton/flow-"  # the fence: only a flow pushes here
 # labels only a flow sets. anton:running and anton:pr also belong to normal jobs, so they cannot mark one
 FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:blocked")
 
