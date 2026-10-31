@@ -15,7 +15,7 @@ TERMINAL = ("done", "cancelled")
 STATE_KINDS = ("queued", "running", "awaiting-gate", "blocked", "cancelling", "done", "cancelled")
 JOB_STAGES = ("plan", "revise", "implement", "review", "fix", "cleanup")
 EVENT_KINDS = ("start", "step_finished", "gate_passed", "gate_rejected", "pr_opened", "pr_merged", "pr_closed",
-               "issue_closed", "head_moved", "stall_detected", "retry", "cancel")
+               "issue_closed", "head_moved", "stall_detected", "retry", "cancel", "effect_failed")
 MAX_REVISIONS = 3
 MAX_RETRIES = 1  # a failed step, a stalled one: once more, then the owner
 RETRY_DELAYS = (60, 300)  # seconds before a retry, by retries used
@@ -285,17 +285,28 @@ def on_stall(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Actio
     return (flow, []) if flow.stalled else (replace(flow, stalled=True), [Action("cancel_job")])
 
 
+def on_effect_failed(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
+    """An action gave up: its outbox entries are gone. The job may still run, and nothing would read its result."""
+    running = [Action("cancel_job")] if flow.kind == "running" else []
+    flow, actions = block(flow, event.text)
+    return flow, [*running, *actions]
+
+
 def on_retry(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
     flow = replace(flow, retries=0, revisions=0, reason="", head=event.head or flow.head)
     if flow.stage.startswith("gate:"):
-        return enter(flow, flow.stage)
+        # a failed action left the outbox, so a gate may have no pull request, or a draft that should be ready
+        repair = [Action("open_pr", {"title": flow.title, "summary": flow.summary, "gates": list(flow.gates)})
+                  if flow.pr is None else Action("mark_ready")] if flow.pr is None or flow.stage == "gate:merge" else []
+        flow, actions = enter(flow, flow.stage)
+        return flow, [*repair, *actions]
     return submit(flow, flow.stage)
 
 
 Handler = Callable[[Flow, Event, Policy], "tuple[Flow, list[Action]]"]
 IGNORE: Handler = lambda flow, event, policy: (flow, [])
 _ends = {"pr_merged": on_merged, "pr_closed": on_pr_closed, "issue_closed": on_issue_closed, "cancel": on_cancel,
-         "pr_opened": on_pr_opened}
+         "pr_opened": on_pr_opened, "effect_failed": on_effect_failed}
 TABLE: dict[str, dict[str, Handler]] = {
     "queued": {**_ends, "start": on_start, "step_finished": IGNORE, "gate_passed": IGNORE, "gate_rejected": IGNORE,
                "head_moved": IGNORE, "stall_detected": IGNORE, "retry": IGNORE},
@@ -305,12 +316,12 @@ TABLE: dict[str, dict[str, Handler]] = {
     "awaiting-gate": {**_ends, "start": IGNORE, "step_finished": IGNORE, "gate_passed": on_gate_passed,
                       "gate_rejected": on_gate_rejected, "head_moved": on_head_moved, "stall_detected": IGNORE,
                       "retry": IGNORE},
-    "blocked": {**_ends, "start": IGNORE, "step_finished": IGNORE, "gate_passed": IGNORE, "gate_rejected": IGNORE,
+    "blocked": {**_ends, "effect_failed": IGNORE, "start": IGNORE, "step_finished": IGNORE, "gate_passed": IGNORE, "gate_rejected": IGNORE,
                 "head_moved": IGNORE, "stall_detected": IGNORE, "retry": on_retry},
     "cancelling": {"start": IGNORE, "step_finished": on_cancelling_finished, "gate_passed": IGNORE,
                    "gate_rejected": IGNORE, "pr_opened": on_pr_opened, "pr_merged": on_merged, "pr_closed": IGNORE,
                    "issue_closed": IGNORE, "head_moved": IGNORE, "stall_detected": IGNORE, "retry": IGNORE,
-                   "cancel": IGNORE},
+                   "cancel": IGNORE, "effect_failed": IGNORE},
     "done": {kind: IGNORE for kind in EVENT_KINDS},
     # merged wins: a close seen first must not turn a merge into a cancelled flow
     "cancelled": {**{kind: IGNORE for kind in EVENT_KINDS}, "pr_merged": on_merged},

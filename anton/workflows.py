@@ -18,6 +18,13 @@ WORKFLOWS = {w.name: w for w in (
     Workflow("standard", ("plan", "pr", "gate:plan", "implement", "review", "cleanup", "ready", "gate:merge")),
 )}
 LABEL_PREFIX = "flow:"
+# labels only a flow sets. anton:running and anton:pr also belong to normal jobs, so they cannot mark one
+FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:blocked")
+
+
+def is_flow_issue(labels) -> bool:
+    """For the older ways in: a shortcut with a clear message. The branch fence in prs.inspect_pr is the guarantee."""
+    return any(x.startswith(LABEL_PREFIX) or x in FLOW_ONLY_LABELS for x in labels)
 
 
 def from_label(label: str) -> Workflow | None:

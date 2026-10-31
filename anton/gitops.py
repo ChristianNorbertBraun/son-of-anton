@@ -80,6 +80,8 @@ def branch_name(issue: int | None, job_id: str, title: str | None = None) -> str
     if issue is not None:
         return f"{BRANCH_PREFIX}issue-{int(issue)}-{suffix}"
     slug = ascii_slug(title or "")[:30].strip("-")
+    if slug.startswith("flow"):  # anton/flow-* belongs to flows: a job titled "Flow fix" must stay outside
+        slug = f"work-{slug}"[:30].strip("-")
     return f"{BRANCH_PREFIX}{slug or 'work'}-{suffix}"
 
 

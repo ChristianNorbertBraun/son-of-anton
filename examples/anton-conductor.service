@@ -1,0 +1,16 @@
+# ~/.config/systemd/user/anton-conductor.service
+# PartOf: an update restarts anton.service only, and this unit must not keep running the old release.
+# A broken conductor does not trigger the updater's rollback.
+[Unit]
+Description=Son of Anton conductor
+After=anton.service
+PartOf=anton.service
+
+[Service]
+WorkingDirectory=%h/current
+ExecStart=/usr/bin/python3 -m anton conduct
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=anton.service

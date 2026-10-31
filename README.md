@@ -65,6 +65,22 @@ If `~/.config/son-of-anton/bridge-token` exists (one token file per chat client,
 
 They use the same submit path as everything else, plus smaller per-client quotas (`bridge_daily_limit` jobs, `bridge_write_limit` GitHub writes, `bridge_ask_limit` questions), because a chat agent can be prompt-injected. Put `telegram-token` and `telegram-chat` next to it to get a message when a job starts or ends.
 
+### Flows
+
+A flow takes an issue from label to merge in several steps, with a gate wherever a person has to decide. It needs `tracker = "github"`, checks and `allowed_authors` in the repo's config, and a running `anton conduct` (see `examples/anton-conductor.service`).
+
+| Label | Steps |
+|---|---|
+| `flow:quick` | implement, draft PR, review, fix if needed, ready, you merge |
+| `flow:standard` | plan, draft PR, you approve the plan, implement, review, fix if needed, remove the plan, ready, you merge |
+
+- A flow starts only if the issue's author is allowed (or the App, for issues from chat) and an allowed person set the label. The label goes away at the start; set it again for a new flow.
+- The plan gate is a review on the draft PR, for the commit it was written on: "Approve" goes on, "Request changes" revises the plan on the same PR, up to 3 times. Reviews from anyone else, bots, the App or chat agents do nothing.
+- Each code change passes the repo's checks before it is pushed, with up to 3 attempts to fix a failure. A flow never force-pushes, and the branch `anton/flow-<id>` is off limits for every other job.
+- Steps load the repo's `CLAUDE.md`. Everything else a checkout could use to configure Claude is hidden, and a step cannot change a `CLAUDE.md`.
+- `blocked` means the owner has to look. The reason is on the issue. `anton flow show <id>` has the details, `anton flow retry <id>` runs the step again and adopts the branch head, and `anton flow cancel <id>` ends the flow.
+- Each line of an optional `private-strings` file in the config directory is refused in anything a flow writes to GitHub. Normal jobs do not read it. `private_check = false` turns it off for a repo.
+
 ## Setup
 
 1. Dedicated unprivileged user; `python3` (3.11+), `git`, `openssl`, `bubblewrap`, Node for your projects.

@@ -54,6 +54,7 @@ class RepoConfig:
     allowed_authors: tuple[str, ...] = ()  # GitHub logins whose issues may trigger jobs; empty = polling off
     trigger_label: str = "anton"
     private_check: bool = True  # flows refuse the values of private-strings; off for repos that legitimately have them
+    tracker: str | None = None  # "github": the conductor runs flows here. Without it the repo has no flows
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,9 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
         private_check = r.get("private_check", True)
         if not isinstance(private_check, bool):
             raise ConfigError(f"{w}.private_check: must be true or false")
+        tracker = r.get("tracker")
+        if tracker not in (None, "github"):
+            raise ConfigError(f"{w}.tracker: only 'github' is implemented")
         repos[slug] = RepoConfig(
             slug=slug, host=host,
             installation_id=_int(_req(r, "installation_id", w), f"{w}.installation_id", 1, 2**40),
@@ -228,8 +232,12 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
             model=model,
             allowed_authors=_authors(r.get("allowed_authors", []), f"{w}.allowed_authors"),
             trigger_label=_label(r.get("trigger_label", "anton"), f"{w}.trigger_label"),
-            private_check=private_check,
+            private_check=private_check, tracker=tracker,
         )
+        if tracker and not repos[slug].checks:  # every code change is followed by a check, or a flow cannot hold
+            raise ConfigError(f"{w}: a repo with a tracker needs checks")
+        if tracker and not repos[slug].allowed_authors:
+            raise ConfigError(f"{w}: a repo with a tracker needs allowed_authors")
     return repos
 
 

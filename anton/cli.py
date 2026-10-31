@@ -1,4 +1,4 @@
-"""anton run | enqueue | ask | queue | cancel | serve | poll | patch | update | version | jobs | selftest"""
+"""anton run | enqueue | ask | queue | cancel | serve | conduct | flow | poll | patch | update | version | jobs | selftest"""
 from __future__ import annotations
 
 import argparse
@@ -10,8 +10,9 @@ import sys
 import threading
 from pathlib import Path
 
-from . import bridge, config, poller, runner, updater
+from . import bridge, config, conductor, poller, runner, updater
 from .events import Dispatcher
+from .flowdb import FlowDb
 from .github import GitHub
 from .pool import Pool
 from .queue import InputError, LimitError, Queue
@@ -23,6 +24,8 @@ from .version import __version__
 STATE_DIR = Path.home() / ".local/state/son-of-anton"
 DB_PATH = STATE_DIR / "queue.db"
 LOCK_PATH = STATE_DIR / "serve.lock"
+FLOW_DB_PATH = STATE_DIR / "flows.db"
+CONDUCT_LOCK_PATH = STATE_DIR / "conduct.lock"
 
 
 def open_queue(settings: config.Settings) -> Queue:
@@ -176,6 +179,63 @@ def cmd_serve(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_conduct(a: argparse.Namespace) -> int:
+    settings = config.load_settings()
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = os.open(CONDUCT_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+    try:  # two conductors would each run every action of the outbox
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another `anton conduct` is already running", file=sys.stderr)
+        return 3
+    q = open_queue(settings)
+    gh_for = github_factory(settings)
+    c = conductor.Conductor(FlowDb(FLOW_DB_PATH), q, Service(q, settings.repos), settings, conductor.github_ports(gh_for),
+                            conductor.policy_for(settings, tuple(CLIENTS)))
+    repos = [r.slug for r in settings.repos.values() if r.tracker]
+    print(f"anton conduct: every {settings.daemon.poll_seconds}s on {', '.join(repos) or 'no repo'}", flush=True)
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+    c.run_forever(stop, settings.daemon.poll_seconds)
+    return 0
+
+
+def _flow(db: FlowDb, flow_id: str):
+    flow = db.get(flow_id)
+    if flow is None:
+        print(f"no flow {safe(flow_id, 40)}", file=sys.stderr)
+    return flow
+
+
+def cmd_flow_list(a: argparse.Namespace) -> int:
+    for f in FlowDb(FLOW_DB_PATH).recent(a.limit):
+        print(f"{f.id}  {f.state:<24} {f.repo}#{f.key}  {f.workflow}  {safe(f.reason, 80)}")
+    return 0
+
+
+def cmd_flow_show(a: argparse.Namespace) -> int:
+    db = FlowDb(FLOW_DB_PATH)
+    flow = _flow(db, a.id)
+    if flow is None:
+        return 1
+    print(f"{flow.id}  {flow.state}  {flow.repo}#{flow.key}  {flow.workflow}  branch {flow.branch}  pr {flow.pr}")
+    if flow.reason:
+        print(f"reason: {safe(flow.reason, 300)}")
+    for run in db.runs(flow.id):
+        print(f"  {run.stage:<10} job {run.job}  {run.result:<14} ${run.usage.get('cost_usd', 0):.2f}  {run.job_id}")
+    return 0
+
+
+def cmd_flow_command(a: argparse.Namespace) -> int:
+    db = FlowDb(FLOW_DB_PATH)
+    if _flow(db, a.id) is None:
+        return 1
+    db.add_command(a.id, a.kind)  # the conductor is the only writer of flow state
+    print(f"{a.kind} requested")
+    return 0
+
+
 def cmd_poll(a: argparse.Namespace) -> int:
     """Check GitHub for labelled issues once and queue what qualifies (the daemon does this on a timer)."""
     settings = config.load_settings()
@@ -286,6 +346,19 @@ def main(argv: list[str] | None = None) -> int:
     c.set_defaults(fn=cmd_cancel)
     s = sub.add_parser("serve", help="run the worker pool (daemon)")
     s.set_defaults(fn=cmd_serve)
+    sub.add_parser("conduct", help="run the flows (daemon)").set_defaults(fn=cmd_conduct)
+    fl = sub.add_parser("flow", help="look at or steer flows").add_subparsers(required=True)
+    fll = fl.add_parser("list")
+    fll.add_argument("--limit", type=int, default=20)
+    fll.set_defaults(fn=cmd_flow_list)
+    fls = fl.add_parser("show")
+    fls.add_argument("id")
+    fls.set_defaults(fn=cmd_flow_show)
+    for kind, text in (("retry", "run a blocked flow's step again, adopting the branch head"),
+                       ("cancel", "end a flow, wait for its job and close its pull request")):
+        flc = fl.add_parser(kind, help=text)
+        flc.add_argument("id")
+        flc.set_defaults(fn=cmd_flow_command, kind=kind)
     po = sub.add_parser("poll", help="check GitHub for labelled issues once")
     po.add_argument("--once", action="store_true", required=True)
     po.set_defaults(fn=cmd_poll)
