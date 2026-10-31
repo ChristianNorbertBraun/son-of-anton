@@ -1,0 +1,14 @@
+# ~/.config/systemd/user/anton-dashboard.service
+[Unit]
+Description=Son of Anton dashboard
+After=anton.service
+PartOf=anton.service
+
+[Service]
+WorkingDirectory=%h/current
+ExecStart=/usr/bin/python3 -m anton dashboard
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=anton.service

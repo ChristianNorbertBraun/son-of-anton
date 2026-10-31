@@ -74,6 +74,8 @@ class DaemonConfig:
     bridge_daily_limit: int = 5  # jobs the chat agent may start per rolling 24h (it can be prompt-injected)
     bridge_write_limit: int = 30  # GitHub write actions (issues, comments) per chat client and 24h
     bridge_ask_limit: int = 30  # read-only questions about a repo per chat client and 24h
+    dashboard_port: int = 8766
+    dashboard_bind: str = "127.0.0.1"  # loopback only, reached through an SSH tunnel: nothing to open in a firewall
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,11 @@ def parse_daemon(data: dict) -> DaemonConfig:
         bridge_daily_limit=_int(d.get("bridge_daily_limit", 5), "daemon.bridge_daily_limit", 1, 100),
         bridge_write_limit=_int(d.get("bridge_write_limit", 30), "daemon.bridge_write_limit", 1, 500),
         bridge_ask_limit=_int(d.get("bridge_ask_limit", 30), "daemon.bridge_ask_limit", 1, 500),
+        dashboard_port=_int(d.get("dashboard_port", 8766), "daemon.dashboard_port", 1024, 65535),
+        dashboard_bind=d.get("dashboard_bind", "127.0.0.1"),
     )
+    if not (isinstance(cfg.dashboard_bind, str) and re.fullmatch(r"127(\.\d{1,3}){3}", cfg.dashboard_bind)):
+        raise ConfigError("daemon.dashboard_bind: must be a loopback address")
     return cfg
 
 
