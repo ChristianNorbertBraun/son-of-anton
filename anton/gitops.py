@@ -109,6 +109,21 @@ def violations(changed: list[str], protected: tuple[str, ...]) -> list[str]:
     return [raw for raw in changed if odd_path(raw) or is_protected(raw, protected)]
 
 
+def head(cwd: Path) -> str:
+    return git(["rev-parse", "HEAD"], cwd).strip()
+
+
+def tree(cwd: Path, rev: str | None = None) -> str:
+    """The tree of `rev`, or of what is staged."""
+    return git(["rev-parse", f"{rev}^{{tree}}"] if rev else ["write-tree"], cwd).strip()
+
+
+def discard_changes(cwd: Path) -> None:
+    """Back to the last commit, without files a check left behind. Ignored files stay: they are the installed deps."""
+    git(["reset", "-q", "--hard", "HEAD"], cwd)
+    git(["clean", "-fdq"], cwd)
+
+
 def changed_files(cwd: Path) -> list[str]:
     out = git(["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"], cwd)
     return [e[3:] for e in out.split("\0") if e]

@@ -53,6 +53,7 @@ class RepoConfig:
     model: str
     allowed_authors: tuple[str, ...] = ()  # GitHub logins whose issues may trigger jobs; empty = polling off
     trigger_label: str = "anton"
+    private_check: bool = True  # flows refuse the values of private-strings; off for repos that legitimately have them
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,9 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
             raise ConfigError(f"{w}.model: must be a non-empty string")
         deny = tuple(dict.fromkeys(DENY_FLOOR + d_deny + _str_list(r.get("deny_tools", []), f"{w}.deny_tools")))
         allow = _str_list(r["allow_tools"], f"{w}.allow_tools") if "allow_tools" in r else d_allow
+        private_check = r.get("private_check", True)
+        if not isinstance(private_check, bool):
+            raise ConfigError(f"{w}.private_check: must be true or false")
         repos[slug] = RepoConfig(
             slug=slug, host=host,
             installation_id=_int(_req(r, "installation_id", w), f"{w}.installation_id", 1, 2**40),
@@ -224,6 +228,7 @@ def parse_repos(data: dict) -> dict[str, RepoConfig]:
             model=model,
             allowed_authors=_authors(r.get("allowed_authors", []), f"{w}.allowed_authors"),
             trigger_label=_label(r.get("trigger_label", "anton"), f"{w}.trigger_label"),
+            private_check=private_check,
         )
     return repos
 

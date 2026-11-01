@@ -146,7 +146,8 @@ def cmd_serve(a: argparse.Namespace) -> int:
 
     updater.mark_running()
     dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for), TelegramNotifier()])
-    pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry), settings.daemon.max_parallel,
+    pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry, queue=q),
+                settings.daemon.max_parallel,
                 on_event=dispatcher.emit, paused=updater.paused)
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
