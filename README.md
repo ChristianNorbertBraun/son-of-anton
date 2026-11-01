@@ -79,6 +79,7 @@ A flow takes an issue from label to merge in several steps, with a gate wherever
 - Each code change passes the repo's checks before it is pushed, with up to 3 attempts to fix a failure. A flow never force-pushes, and the branch `anton/flow-<id>` is off limits for every other job.
 - Steps load the repo's `CLAUDE.md`. Everything else a checkout could use to configure Claude is hidden, and a step cannot change a `CLAUDE.md`.
 - `blocked` means the owner has to look. The reason is on the issue. `anton flow show <id>` has the details, `anton flow retry <id>` runs the step again, and `anton flow cancel <id>` ends the flow. A retry takes over a push to the branch only if that push is what blocked the flow; if the plan could have changed with it, the plan needs approval again.
+- `anton dashboard` is a read-only page of all flows and their steps, on 127.0.0.1 (see `examples/anton-dashboard.service`). Reach it through a tunnel, `ssh -L 8766:127.0.0.1:8766 <host>`, at `http://127.0.0.1:8766/<token>`. The token is in `dashboard-token` in the config directory, made on first start, because loopback does not keep out other users of the machine.
 - Each line of an optional `private-strings` file in the config directory is refused in anything a flow writes to GitHub. Normal jobs do not read it. `private_check = false` turns it off for a repo.
 
 ## Setup

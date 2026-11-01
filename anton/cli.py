@@ -1,4 +1,4 @@
-"""anton run | enqueue | ask | queue | cancel | serve | conduct | flow | poll | patch | update | version | jobs | selftest"""
+"""anton run | enqueue | ask | queue | cancel | serve | conduct | flow | dashboard | poll | patch | update | version | jobs | selftest"""
 from __future__ import annotations
 
 import argparse
@@ -236,6 +236,17 @@ def cmd_flow_command(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dashboard(a: argparse.Namespace) -> int:
+    from . import dashboard
+    settings = config.load_settings()
+    d = settings.daemon
+    token = dashboard.load_token(runner.CONF_DIR / dashboard.TOKEN_FILE)
+    print(f"anton dashboard: on {d.dashboard_bind}:{d.dashboard_port}, under the path in "
+          f"{runner.CONF_DIR / dashboard.TOKEN_FILE}", flush=True)  # never the token itself: this goes to the journal
+    dashboard.serve(FlowDb(FLOW_DB_PATH), d.dashboard_bind, d.dashboard_port, token)
+    return 0
+
+
 def cmd_poll(a: argparse.Namespace) -> int:
     """Check GitHub for labelled issues once and queue what qualifies (the daemon does this on a timer)."""
     settings = config.load_settings()
@@ -359,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         flc = fl.add_parser(kind, help=text)
         flc.add_argument("id")
         flc.set_defaults(fn=cmd_flow_command, kind=kind)
+    sub.add_parser("dashboard", help="show the flows on a read-only web page").set_defaults(fn=cmd_dashboard)
     po = sub.add_parser("poll", help="check GitHub for labelled issues once")
     po.add_argument("--once", action="store_true", required=True)
     po.set_defaults(fn=cmd_poll)

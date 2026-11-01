@@ -19,6 +19,7 @@ bridge_port = 8765          # MCP endpoint for a chat agent, 127.0.0.1 only; nee
 bridge_daily_limit = 30     # code-change jobs each chat client may start per 24h
 bridge_write_limit = 100    # GitHub writes (issues, comments) per chat client and 24h
 bridge_ask_limit = 100      # read-only questions per chat client and 24h
+dashboard_port = 8766       # `anton dashboard`, 127.0.0.1 by default: reach it through an SSH tunnel
 
 [defaults]
 model = "claude-opus-5-5"
