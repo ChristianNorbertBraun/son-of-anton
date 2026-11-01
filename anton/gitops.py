@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import hashlib
 import os
 import re
 import subprocess
 import unicodedata
 from pathlib import Path
 
+from . import sandbox
 from .config import BRANCH_PREFIX
 
 # The working tree is attacker-influenced (npm scripts, model output). Never run hooks or
 # fsmonitor programs from it, and ignore system/global git config (no lfs or other filter drivers).
+# XDG_CONFIG_HOME: git also reads ~/.config/git/{ignore,attributes}, and those survive GIT_CONFIG_GLOBAL.
 SAFE_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
               "-c", "protocol.ext.allow=never"]
-ISOLATED_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+ISOLATED_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null",
+                   "GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "60"}
+GIT_TIMEOUT = 900  # nothing polls for a cancel while git runs: a stalled connection must end by itself
 
 # Matched case-insensitively and at ANY depth. A job that touches these fails, nothing is pushed.
 ALWAYS_PROTECTED = (
@@ -52,7 +57,11 @@ def git_cmd(args: list[str]) -> list[str]:
 
 def git(args: list[str], cwd: Path | None = None, env: dict | None = None) -> str:
     full = {**os.environ, **ISOLATED_CONFIG, **(env or {})}
-    p = subprocess.run(git_cmd(args), cwd=cwd, env=full, capture_output=True, text=True)
+    try:
+        p = subprocess.run(git_cmd(args), cwd=cwd, env=full, capture_output=True, text=True, errors="replace",
+                           timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {' '.join(args[:2])} timed out") from None
     if p.returncode != 0:
         # never echo env; stderr from git does not contain the header
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {p.stderr.strip()[:400]}")
@@ -124,6 +133,31 @@ def discard_changes(cwd: Path) -> None:
     git(["clean", "-fdq"], cwd)
 
 
+def exclude_masked(cwd: Path) -> None:
+    """bwrap leaves its mount points in the checkout. Without this, every step would see a change there."""
+    path = cwd / ".git/info/exclude"
+    path.parent.mkdir(exist_ok=True)
+    names = [f"/{n}/" for n in sandbox.MASKED_DIRS] + [f"/{n}" for n in sandbox.MASKED_FILES]
+    with open(path, "a") as f:
+        f.write("".join(f"{n}\n" for n in names))
+
+
+def _fingerprint(path: Path) -> str:
+    """Never follows a link: this runs outside the sandbox, on files the sandbox made."""
+    if path.is_symlink():
+        return f"link:{os.readlink(path)}"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "other"
+
+
+def hidden_instructions(cwd: Path) -> dict[str, str]:
+    """Files that instruct Claude and that git does not look at, with a fingerprint. An agent can gitignore one, and a
+    later attempt would obey it. A dependency may ship one too: callers compare against what the install left."""
+    out = git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ":(glob,icase)**/CLAUDE.md",
+               ":(glob,icase)**/CLAUDE.local.md", ":(glob)**/.claude/**"], cwd)
+    masked = (*sandbox.MASKED_FILES, *(f"{d}/" for d in sandbox.MASKED_DIRS))
+    return {p: _fingerprint(cwd / p) for p in out.split("\0") if p and not p.startswith(masked)}
+
+
 def changed_files(cwd: Path) -> list[str]:
     out = git(["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"], cwd)
     return [e[3:] for e in out.split("\0") if e]
@@ -159,6 +193,12 @@ def split_staged(cwd: Path, protected: tuple[str, ...]) -> tuple[list[str], list
         elif is_protected(path, protected):
             protected_paths.append(path)
     return hard, protected_paths
+
+
+def staged_text(cwd: Path) -> str:
+    """The staged change as text, for scanning. --text: a NUL byte, or a `-diff` in a .gitattributes that an ignore
+    rule keeps out of the staged paths, must not turn a file into 'Binary files differ'."""
+    return git(["diff", "--cached", "--no-ext-diff", "--no-color", "--text"], cwd)
 
 
 def staged_patch(cwd: Path) -> str:

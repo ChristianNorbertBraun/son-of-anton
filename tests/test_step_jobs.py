@@ -103,7 +103,8 @@ class StepQueueTests(Base):
 
     def test_intended_sha_and_output_are_kept(self):
         job, _ = self.step()
-        self.q.record_intended_sha(job.id, "abc123")
+        self.q.record_intended_push(job.id, "abc123", {"outcome": "pushing", "title": "T"})
+        self.assertEqual(self.q.step(job.id).output["title"], "T")
         self.q.record_step_output(job.id, {"outcome": "ok", "cost": 1.5})
         step = self.q.step(job.id)
         self.assertEqual(step.intended_sha, "abc123")
@@ -120,7 +121,7 @@ class StepQueueTests(Base):
     def test_a_restart_fails_a_running_step_but_keeps_its_intended_sha(self):
         job, _ = self.step()
         self.q.claim_next(1)
-        self.q.record_intended_sha(job.id, "abc123")
+        self.q.record_intended_push(job.id, "abc123", {"title": "T"})
         self.assertEqual(self.q.recover(), 1)
         self.assertEqual(self.q.get(job.id).reason, "daemon restarted")
         self.assertEqual(self.q.step(job.id).intended_sha, "abc123")

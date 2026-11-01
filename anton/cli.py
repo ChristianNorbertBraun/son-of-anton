@@ -121,6 +121,10 @@ def cmd_cancel(a: argparse.Namespace) -> int:
     return 0
 
 
+def job_runner(settings: config.Settings, q: Queue, dry: bool):
+    return lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry, queue=q)
+
+
 def cmd_serve(a: argparse.Namespace) -> int:
     settings = config.load_settings()
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -146,8 +150,7 @@ def cmd_serve(a: argparse.Namespace) -> int:
 
     updater.mark_running()
     dispatcher = Dispatcher([log_event, poller.IssueReporter(settings, gh_for), TelegramNotifier()])
-    pool = Pool(q, lambda row, sc: runner.run_queued(row, settings, sc, dry_run=dry, queue=q),
-                settings.daemon.max_parallel,
+    pool = Pool(q, job_runner(settings, q, dry), settings.daemon.max_parallel,
                 on_event=dispatcher.emit, paused=updater.paused)
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

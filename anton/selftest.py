@@ -2,6 +2,7 @@
 It runs through the SAME functions the runner uses (sb_cmd, clean_env), not a copy of them."""
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,6 +11,37 @@ from . import gitops, runner, sandbox
 from .proc import run_capped
 
 CONF = runner.CONF_DIR
+
+# flow steps load the repo's CLAUDE.md: what else a checkout could configure must be out of reach
+MASK_SCRIPT = """
+t() { n=$1; shift; if "$@" >/dev/null 2>&1; then echo "FAIL $n (was allowed)"; else echo "PASS $n"; fi; }
+y() { n=$1; shift; if "$@" >/dev/null 2>&1; then echo "PASS $n"; else echo "FAIL $n (was blocked)"; fi; }
+t mask-hides-planted-settings test -e /work/.claude/settings.json
+t mask-mcp-is-empty           test -s /work/.mcp.json
+t mask-mcp-refuses-writes     sh -c 'echo x > /work/.mcp.json'
+t mask-local-refuses-writes   sh -c 'echo x > /work/CLAUDE.local.md'
+y mask-mcp-is-readable        cat /work/.mcp.json
+y mask-claude-dir-writable    touch /work/.claude/vanishes
+y repo-instructions-visible   test -s /work/CLAUDE.md
+"""
+
+
+def check_masks(work: Path) -> list[str]:
+    """Run MASK_SCRIPT on a checkout with planted files, then look at what is left on this side of the sandbox."""
+    (work / ".claude").mkdir()
+    (work / ".claude/settings.json").write_text('{"hooks": {}}')
+    (work / ".mcp.json").write_text('{"mcpServers": {}}')
+    (work / "CLAUDE.md").write_text("repo instructions\n")
+    gitops.exclude_masked(work)
+    _, out, _ = run_capped(runner.sb_cmd(work, ["bash", "-c", MASK_SCRIPT], masks=True), cwd=None,
+                           env=runner.clean_env(), timeout=60, limit=8000)
+    lines = [ln for ln in out.splitlines() if ln.startswith(("PASS", "FAIL"))]
+    expected = re.findall(r"^[ty] (\S+)", MASK_SCRIPT, re.M)  # a sandbox that never started must not look like a pass
+    lines += [f"FAIL {name} (did not run)" for name in expected if not any(name in ln for ln in lines)]
+    lines.append("FAIL mask-writes-reach-the-checkout" if (work / ".claude/vanishes").exists()
+                 or (work / ".mcp.json").read_text() != '{"mcpServers": {}}' else "PASS mask-writes-vanish")
+    return lines
+
 
 # t = must FAIL inside the sandbox, y = must SUCCEED, WARN lines are known gaps (not failures)
 SCRIPT = f"""
@@ -54,6 +86,7 @@ def run() -> int:
         code, out, _ = run_capped(runner.sb_cmd(work, ["bash", "-c", SCRIPT]), cwd=None,
                                   env=runner.clean_env(), timeout=120, limit=20_000)
         lines = [ln for ln in out.splitlines() if ln.startswith(("PASS", "FAIL", "WARN"))]
+        lines += check_masks(work)
         # the agent itself must start inside the sandbox (no token needed for --version)
         v = subprocess.run(runner.sb_cmd(work, [sandbox.CLAUDE_IN_SANDBOX, "--version"], with_claude=True),
                            env=runner.clean_env(), capture_output=True, text=True, timeout=60)

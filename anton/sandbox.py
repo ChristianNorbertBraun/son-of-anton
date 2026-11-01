@@ -21,6 +21,12 @@ TMP_BYTES = 512 * 1024 * 1024
 HOME_BYTES = 64 * 1024 * 1024
 MAX_FILE_KB = 1024 * 1024  # largest single file a sandboxed process may write (1 GiB)
 MAX_PROCS = 1024
+# Hidden from Claude in flow steps, which load the repo's CLAUDE.md: everything else that a checkout can use to
+# configure Claude stays out of reach. A file becomes read-only and empty, writes to the directory vanish with it.
+# Not /dev/null: a ro-bind is mounted nodev, so opening it there fails instead of reading nothing.
+MASKED_DIRS = (".claude",)
+MASKED_FILES = (".mcp.json", "CLAUDE.local.md")
+MASK_BYTES = 1024 * 1024
 # runs inside the sandbox before the real command: bound file size and process count
 LIMIT_SCRIPT = f'ulimit -f {MAX_FILE_KB}; ulimit -u {MAX_PROCS}; exec "$@"'
 
@@ -33,8 +39,17 @@ def available() -> bool:
     return shutil.which("bwrap") is not None
 
 
+def check_masks(work: Path) -> None:
+    """A mount follows symlinks, and a mount of the wrong type stops bwrap: refuse before anything runs."""
+    for names, is_kind in ((MASKED_DIRS, Path.is_dir), (MASKED_FILES, Path.is_file)):
+        for name in names:
+            path = work / name
+            if path.is_symlink() or (path.exists() and not is_kind(path)):
+                raise SandboxError(f"{name} in the checkout is not a plain {'directory' if names is MASKED_DIRS else 'file'}")
+
+
 def wrap(cmd: list[str], work: Path, claude_bin: Path | None = None,
-         etc_dir: Path = Path("/etc"), protected: tuple[Path, ...] = ()) -> list[str]:
+         etc_dir: Path = Path("/etc"), protected: tuple[Path, ...] = (), masks: bool = False) -> list[str]:
     """Prefix `cmd` with a bwrap invocation. Fails closed if the checkout overlaps a protected dir."""
     work = Path(work).resolve()
     for p in protected:
@@ -57,6 +72,14 @@ def wrap(cmd: list[str], work: Path, claude_bin: Path | None = None,
     if (work / ".git").exists():
         # hooks/config written here would later run OUTSIDE the sandbox, with the GitHub token
         args += ["--ro-bind", str(work / ".git"), f"{WORK}/.git"]
+    if masks:
+        check_masks(work)
+        for name in MASKED_DIRS:
+            args += ["--size", str(MASK_BYTES), "--tmpfs", f"{WORK}/{name}"]
+        empty = work.parent / "mask-empty"
+        empty.touch(mode=0o400)
+        for name in MASKED_FILES:
+            args += ["--ro-bind", str(empty), f"{WORK}/{name}"]
     if claude_bin is not None:
         args += ["--ro-bind", str(Path(claude_bin).resolve()), CLAUDE_IN_SANDBOX]
     return args + ["--chdir", WORK, "--", "bash", "-c", LIMIT_SCRIPT, "_", *cmd]

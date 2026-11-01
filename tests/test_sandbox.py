@@ -1,6 +1,9 @@
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from anton import gitops, sandbox
 from anton.sandbox import SandboxError
@@ -83,7 +86,66 @@ class WrapTests(unittest.TestCase):
             sandbox.wrap(["true"], self.root, protected=(self.conf,))
 
 
+class MaskTests(WrapTests):
+    def test_normal_jobs_have_no_masks(self):
+        cmd = self.wrap()
+        self.assertNotIn("/work/.claude", cmd)
+        self.assertNotIn("/work/.mcp.json", cmd)
+
+    def test_masks_come_after_the_checkout_mount(self):
+        cmd = self.wrap(masks=True)
+        i = cmd.index("/work/.claude")
+        self.assertEqual(cmd[i - 1], "--tmpfs")
+        self.assertEqual(cmd[i - 3:i - 1], ["--size", str(sandbox.MASK_BYTES)])
+        self.assertLess(cmd.index("/work"), i)
+        for name in ("/work/.mcp.json", "/work/CLAUDE.local.md"):
+            j = cmd.index(name)
+            self.assertEqual(cmd[j - 2:j], ["--ro-bind", str(self.work.parent / "mask-empty")])
+        self.assertEqual((self.work.parent / "mask-empty").stat().st_size, 0)
+        self.assertLess(max(cmd.index("/work/.mcp.json"), i), cmd.index("--"))
+
+    def test_a_symlink_at_a_mask_is_refused(self):
+        (self.work / ".claude").symlink_to("/etc")
+        with self.assertRaises(SandboxError):
+            self.wrap(masks=True)
+
+    def test_a_mask_of_the_wrong_type_is_refused(self):
+        (self.work / ".mcp.json").mkdir()
+        with self.assertRaises(SandboxError):
+            self.wrap(masks=True)
+
+    def test_existing_plain_paths_are_fine(self):
+        (self.work / ".claude").mkdir()
+        (self.work / ".mcp.json").write_text("{}")
+        self.assertIn("/work/.claude", self.wrap(masks=True))
+
+
 class GitHardeningTests(unittest.TestCase):
+    def test_a_hung_git_ends_with_an_error(self):
+        with mock.patch("anton.gitops.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                gitops.git(["push", "origin"])
+
+    def test_git_output_that_is_no_utf8_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            gitops.git(["init", "-q", "."], work)
+            (work / "latin1.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+            gitops.git(["add", "-A"], work)
+            self.assertIn("latin1.txt", gitops.staged_text(work))
+
+    def test_the_users_ignore_file_cannot_hide_a_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, work = Path(d) / "home", Path(d) / "work"
+            (home / ".config/git").mkdir(parents=True)
+            (home / ".config/git/ignore").write_text("secret.txt\n")
+            work.mkdir()
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                os.environ.pop("XDG_CONFIG_HOME", None)
+                gitops.git(["init", "-q", "."], work)
+                (work / "secret.txt").write_text("x\n")
+                self.assertEqual(gitops.changed_files(work), ["secret.txt"])
+
     def test_git_never_runs_hooks_or_fsmonitor(self):
         cmd = gitops.git_cmd(["status"])
         self.assertEqual(cmd[0], "git")

@@ -245,9 +245,10 @@ class Queue:
                           "WHERE s.flow_id=? AND s.step_id=? AND s.attempt=?", (flow_id, step_id, attempt)).fetchone()
             return _row(r) if r else None
 
-    def record_intended_sha(self, job_id: str, sha: str) -> None:
+    def record_intended_push(self, job_id: str, sha: str, output: dict) -> None:
+        """Written before the push: if the job dies right after it, the output still says what the step did."""
         with self._conn() as c:
-            c.execute("UPDATE step_jobs SET intended_sha=? WHERE job_id=?", (sha, job_id))
+            c.execute("UPDATE step_jobs SET intended_sha=?, output=? WHERE job_id=?", (sha, json.dumps(output), job_id))
 
     def record_step_output(self, job_id: str, output: dict) -> None:
         with self._conn() as c:
