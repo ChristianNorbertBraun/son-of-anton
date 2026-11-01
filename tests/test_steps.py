@@ -341,6 +341,46 @@ class RepoInstructionTests(Base):
         self.assertEqual(sorted(self.remote_files()), ["app.txt", "new.txt"])
 
 
+class CarriageReturnTests(Base):
+    """A lone CR is one character to git. Read as text it would become a line, and the hunk would seem to end early."""
+
+    def secret(self):
+        (self.conf / "claude-token").write_text("a-very-long-stored-secret\n")
+        return "a-very-long-stored-secret"
+
+    def test_a_secret_after_a_lone_cr_is_found(self):
+        secret = self.secret()
+        for text in (f"x\ry\n{secret}\n", f"a\rb\rc\rd\n1\n2\n{secret}\n", f"x\r{secret}\n"):
+            with self.subTest(text=text.replace(secret, "<secret>")):
+                _, step, _ = self.run_step(self.spec("implement"), FakeClaude(
+                    lambda work, t=text: (work / "new.txt").write_bytes(t.encode())))
+                self.assertEqual(step.output["outcome"], "secret")
+                self.assertIsNone(self.remote_head())
+
+    def test_a_secret_after_a_cr_in_a_context_line_is_found(self):
+        secret = self.secret()
+        (self.seed / "app.txt").write_bytes(b"one\rtwo\n")
+        sh(["add", "-A"], self.seed)
+        sh(["commit", "-q", "-m", "cr"], self.seed)
+        sh(["push", "-q", "origin", "main"], self.seed)
+        self.base = sh(["rev-parse", "HEAD"], self.seed)
+        _, step, _ = self.run_step(self.spec("implement"), FakeClaude(
+            lambda work: (work / "app.txt").write_bytes(f"one\rtwo\n{secret}\n".encode())))
+        self.assertEqual(step.output["outcome"], "secret")
+
+    def test_git_output_is_not_changed_on_the_way_in(self):
+        (self.seed / "new.txt").write_bytes(b"a\rb\r\n")
+        gitops.git(["add", "-A"], self.seed)
+        self.assertIn("a\rb\r\n", gitops.staged_text(self.seed))
+
+    def test_a_patch_that_is_no_utf8_is_not_handed_over(self):
+        out, step, row = self.run_step(self.spec("implement"), FakeClaude(
+            lambda work: ((work / ".github").mkdir(), (work / ".github/x.txt").write_bytes(b"caf\xfc\n"))[0] and None))
+        self.assertEqual(step.output["outcome"], "protected")
+        self.assertIsNone(row.answer)
+        self.assertIn("not UTF-8", step.output["reason"])
+
+
 class ReviewFindingTests(Base):
     """One test for each finding of the first review of this code."""
 

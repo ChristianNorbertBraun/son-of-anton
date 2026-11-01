@@ -172,7 +172,7 @@ class GitCheckTests(unittest.TestCase):
 
     def test_git_ignores_system_and_global_config(self):
         with mock.patch("anton.gitops.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
             gitops.git(["status"])
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")

@@ -19,7 +19,7 @@ from .config import BRANCH_PREFIX
 SAFE_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
               "-c", "protocol.ext.allow=never"]
 ISOLATED_CONFIG = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null",
-                   "GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "60"}
+                   "GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "300"}
 GIT_TIMEOUT = 900  # nothing polls for a cancel while git runs: a stalled connection must end by itself
 
 # Matched case-insensitively and at ANY depth. A job that touches these fails, nothing is pushed.
@@ -57,15 +57,14 @@ def git_cmd(args: list[str]) -> list[str]:
 
 def git(args: list[str], cwd: Path | None = None, env: dict | None = None) -> str:
     full = {**os.environ, **ISOLATED_CONFIG, **(env or {})}
-    try:
-        p = subprocess.run(git_cmd(args), cwd=cwd, env=full, capture_output=True, text=True, errors="replace",
-                           timeout=GIT_TIMEOUT)
+    try:  # bytes: text mode would turn a lone CR into a newline, and a patch must stay the patch git wrote
+        p = subprocess.run(git_cmd(args), cwd=cwd, env=full, capture_output=True, timeout=GIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"git {' '.join(args[:2])} timed out") from None
     if p.returncode != 0:
         # never echo env; stderr from git does not contain the header
-        raise RuntimeError(f"git {' '.join(args[:2])} failed: {p.stderr.strip()[:400]}")
-    return p.stdout
+        raise RuntimeError(f"git {' '.join(args[:2])} failed: {p.stderr.decode(errors='replace').strip()[:400]}")
+    return p.stdout.decode(errors="replace")
 
 
 def ascii_slug(text: str) -> str:
