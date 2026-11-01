@@ -209,7 +209,8 @@ def run_claude(job: Job, should_cancel: Callable[[], bool], argv: list[str] | No
         raise RuntimeError(f"claude returned no JSON (exit {code})") from None
 
 
-CLOSING_WORD_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b", re.I)
+# only in front of a reference: the words themselves are everywhere, also in URLs and in code
+CLOSING_WORD_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?=[:\s]+(?:https?://|[\w.-]+/[\w.-]+#))", re.I)
 
 
 def neutralize(text: str) -> str:
@@ -416,6 +417,10 @@ def propose(job: Job, title: str, summary: str, protected: list[str], patch: str
         f"Proposed by Anton: {title}", f"Touches protected paths: {paths}",
         f"Apply on a checkout of {target}: git apply <this file>", "", *scrub(summary).splitlines()[:40]))
     text = header + "\n" + scrub(patch)
+    if "\ufffd" in patch:  # not UTF-8: as text this patch would apply and write the wrong bytes
+        reason = "the patch cannot be handed over as text: a file in it is not UTF-8"
+        job.state("failed", reason=reason)
+        return Outcome("failed", reason=reason)
     if len(text) > PATCH_LIMIT:
         reason = safe(f"the patch is too large to hand over ({len(text)} characters)")
         job.state("failed", reason=reason)

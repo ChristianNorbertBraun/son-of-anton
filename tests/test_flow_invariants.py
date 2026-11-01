@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from anton import bridge, gitops, poller, prs, runner, sandbox, steps, tripwire
+from anton import bridge, gitops, poller, prs, runner, sandbox, steps, tripwire, workflows
 from anton.conductor import Refused
 from anton.flow import Action, Event, Policy, block, step
 from anton.queue import LimitError
@@ -108,7 +108,7 @@ class HeadInvariants(Rig):
 
 class FenceInvariants(Rig):
     def fenced_pr(self):
-        return {"state": "open", "merged": False, "head": {"ref": "anton/flow-abc", "repo": {"full_name": "example/repo"}},
+        return {"state": "open", "merged": False, "head": {"ref": "anton/flow-1a2b3c4d", "repo": {"full_name": "example/repo"}},
                 "base": {"repo": {"default_branch": "main"}}}
 
     def test_extending_a_pull_request_cannot_reach_a_flow_branch(self):
@@ -116,6 +116,19 @@ class FenceInvariants(Rig):
         gh.pull.return_value = self.fenced_pr()
         with self.assertRaises(prs.PrRefused):
             prs.inspect_pr(gh, self.repo, 1)
+
+    def test_a_real_flow_id_is_what_the_fence_matches(self):
+        flow = self.quick_to_merge_gate()
+        self.assertTrue(prs.FLOW_BRANCH_RE.fullmatch(flow.branch))
+
+    def test_a_branch_of_an_older_job_is_outside_the_fence(self):
+        gh = mock.Mock()
+        pr = self.fenced_pr()
+        pr["head"]["ref"] = "anton/flow-chart-page-136ebb"
+        gh.pull.return_value = pr
+        gh.branch.return_value = {"protected": False}
+        gh.pull_files.return_value = []
+        self.assertEqual(prs.inspect_pr(gh, self.repo, 1).head_ref, "anton/flow-chart-page-136ebb")
 
     def test_the_label_poller_leaves_flow_issues_alone(self):
         gh, service = mock.Mock(), mock.Mock()
@@ -133,6 +146,11 @@ class FenceInvariants(Rig):
             b._queue_issue({"repo": "example/repo", "issue": 7}, "merlin")
         service.submit.assert_not_called()
 
+    def test_a_label_of_the_repo_that_only_looks_like_a_flow_changes_nothing(self):
+        self.assertFalse(workflows.is_flow_issue(["flow:ui", "anton"]))
+        self.assertTrue(workflows.is_flow_issue(["flow:quick"]))
+        self.assertTrue(workflows.is_flow_issue(["flow:standard"]))
+
     def test_a_chat_agent_cannot_rewrite_a_flows_issue(self):
         gh = mock.Mock()
         gh.issue.return_value = {"number": 7, "labels": [{"name": "flow:quick"}]}
@@ -143,7 +161,7 @@ class FenceInvariants(Rig):
 
     def test_every_branch_a_normal_job_makes_is_outside_the_fence(self):
         for issue, title in ((7, None), (None, "flow fix"), (None, "flow"), (None, "Flows"), (None, None)):
-            self.assertFalse(gitops.branch_name(issue, "job-abcdef", title).startswith(prs.FLOW_BRANCH_PREFIX))
+            self.assertFalse(gitops.branch_name(issue, "job-abcdef", title).startswith(workflows.FLOW_BRANCH_PREFIX))
 
 
 class TokenInvariants(Rig):
@@ -295,7 +313,6 @@ class TextInvariants(Rig):
         self.settle(titled, CLEAN)
         message = sh(["log", "-1", "--format=%s", self.flow().head], self.bare)
         self.assertNotIn("#1", message)
-        self.assertNotIn("Closes", message)
         self.assertNotIn("GH-2", message)
 
     def test_model_text_cannot_notify_people_or_close_issues(self):
@@ -307,6 +324,10 @@ class TextInvariants(Rig):
         self.assertNotIn("Closes https", url)
         self.assertNotIn("GH-6", url)
         self.assertTrue(body.startswith("Closes #7"))
+
+    def test_ordinary_words_stay_as_they_are(self):
+        text = "Fixes the close button, see https://example.com/docs/fix/close and `npm run fix`."
+        self.assertEqual(runner.neutralize(text), text)
 
     def test_a_withheld_reason_still_reaches_the_issue_as_a_state(self):
         (self.conf / "private-strings").write_text("privateperson\n")
