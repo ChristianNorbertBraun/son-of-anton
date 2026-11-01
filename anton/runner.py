@@ -414,6 +414,8 @@ def run_job(job: Job, settings: Settings, dry_run: bool = False,
 def run_queued(row: JobRow, settings: Settings, should_cancel: Callable[[], bool],
                dry_run: bool = False) -> Outcome:
     """Pool entry point."""
+    if row.kind == "step":  # never fall through to `execute`: a step is not a change job
+        return Outcome("failed", reason="this release cannot run step jobs")
     return run_job(new_job(get_repo(settings.repos, row.repo), row.task, row.issue, job_id=row.id,
                            pr_number=row.pr_number, kind=row.kind), settings, dry_run=dry_run,
                    should_cancel=should_cancel)

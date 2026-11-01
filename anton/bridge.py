@@ -128,7 +128,7 @@ def _text(text: str, error: bool = False, limit: int = MAX_TEXT) -> dict:
 def _line(row) -> str:
     detail = row.pr or row.reason or ""
     where = f"{row.repo} PR#{row.pr_number}" if getattr(row, "pr_number", None) else row.repo
-    kind = " (question)" if getattr(row, "kind", "change") == "ask" else ""
+    kind = {"ask": " (question)", "step": " (flow step)"}.get(getattr(row, "kind", "change"), "")
     return f"{row.id}  {row.status:<10} {where}{kind}  {safe(row.task, 60)!r}  {safe(detail, 120)}".rstrip()
 
 
