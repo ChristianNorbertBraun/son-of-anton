@@ -43,12 +43,11 @@ class TableTests(unittest.TestCase):
             with self.subTest(state=state, event=event):
                 self.assertIn(event, F.TABLE[state])
 
-    def test_terminal_states_have_nowhere_to_go_except_merged_wins(self):
+    def test_terminal_states_have_nowhere_to_go(self):
         for event in F.EVENT_KINDS:
             with self.subTest(event=event):
                 self.assertEqual(step(replace(new(), state="done"), Event(event), POLICY)[0].state, "done")
-                if event != "pr_merged":
-                    self.assertEqual(step(replace(new(), state="cancelled"), Event(event), POLICY)[0].state, "cancelled")
+                self.assertEqual(step(replace(new(), state="cancelled"), Event(event), POLICY)[0].state, "cancelled")
 
     def test_each_runner_outcome_is_known_to_the_table(self):
         self.assertEqual(set(steps.OUTCOMES) - set(RESULTS), set())
@@ -113,6 +112,7 @@ class WorkflowPathTests(unittest.TestCase):
         self.assertEqual(flow.head, SHA)
         flow, actions = self.advance(flow, head=SHA)
         self.assertEqual((flow.state, kinds(actions)), ("awaiting-gate:merge", ["mark_ready", "report"]))
+        self.assertEqual(actions[0].payload["title"], "T")
         flow, actions = step(flow, Event("pr_merged"), POLICY)
         self.assertEqual((flow.state, kinds(actions)), ("done", ["report"]))
 
@@ -184,7 +184,7 @@ class OutcomeTableTests(unittest.TestCase):
                 first = running(stage)
                 flow, actions = step(first, finished(first, result), POLICY)
                 self.assertEqual((flow.state, flow.retries, flow.jobs), (f"running:{stage}", 1, 2))
-                self.assertGreater(actions[0].delay, 0)
+                self.assertEqual(actions[0].delay, F.RETRY_DELAY)
                 flow, _ = step(flow, finished(flow, result), POLICY)
                 self.assertEqual(flow.state, "blocked")
 
@@ -256,7 +256,7 @@ class GateTests(unittest.TestCase):
         event = gate_event(self.gated(), pr, POLICY)
         flow, actions = step(self.gated(), event, POLICY)
         self.assertEqual(flow.state, "running:revise")
-        feedback = actions[0].payload["spec"]["feedback"]
+        feedback = actions[-1].payload["spec"]["feedback"]
         self.assertIn("Use sqlite", feedback)
         self.assertIn("On this line", feedback)
         for text in ("EVIL", "old", "stale", "conversation"):
@@ -296,12 +296,21 @@ class EndingTests(unittest.TestCase):
         merged = replace(self.PR, state="closed", merged=True)
         self.assertEqual(close_event(new(), merged, closed).kind, "pr_merged")
 
-    def test_merge_and_close_in_both_orders_end_as_done(self):
+    def test_a_close_after_the_merge_changes_nothing(self):
         flow = replace(new(), state="awaiting-gate:merge", stage="gate:merge", pr=3)
-        first = step(flow, Event("issue_closed", actor=OWNER), POLICY)[0]
-        self.assertEqual(step(first, Event("pr_merged"), POLICY)[0].state, "done")
         first = step(flow, Event("pr_merged"), POLICY)[0]
         self.assertEqual(step(first, Event("issue_closed", actor=OWNER), POLICY)[0].state, "done")
+
+    def test_a_merge_while_cancelling_is_a_merge(self):
+        flow = replace(running("review"), state="cancelling")
+        self.assertEqual(step(flow, Event("pr_merged"), POLICY)[0].state, "done")
+
+    def test_a_pull_request_that_opens_while_cancelling_is_known_for_closing(self):
+        flow = replace(running("review"), state="cancelling")
+        flow, _ = step(flow, Event("pr_opened", number=9), POLICY)
+        self.assertEqual(flow.pr, 9)
+        self.assertEqual(kinds(step(flow, finished(flow, "cancelled"), POLICY)[1]), ["report", "close_pr"])
+
 
     def test_a_closed_pr_cancels(self):
         self.assertEqual(close_event(new(), replace(self.PR, state="closed"), self.TASK).kind, "pr_closed")
@@ -340,17 +349,17 @@ class BlockedTests(unittest.TestCase):
         flow = replace(running("revise", feedback="Use sqlite"), state="blocked", reason="x", retries=1, revisions=3)
         flow, actions = step(flow, Event("retry"), POLICY)
         self.assertEqual((flow.state, flow.retries, flow.revisions, flow.reason), ("running:revise", 0, 0, ""))
-        self.assertEqual(actions[0].payload["spec"]["feedback"], "Use sqlite")
+        self.assertEqual(actions[-1].payload["spec"]["feedback"], "Use sqlite")
 
     def test_retry_adopts_a_head_it_is_given(self):
-        flow = replace(running("review"), state="blocked")
+        flow = replace(running("review"), state="blocked", foreign_head=True)
         flow, actions = step(flow, Event("retry", head=OTHER), POLICY)
-        self.assertEqual(actions[0].payload["spec"]["expected_head"], OTHER)
+        self.assertEqual(actions[-1].payload["spec"]["expected_head"], OTHER)
 
     def test_retry_of_a_flow_that_never_pushed_starts_over(self):
         flow = replace(new("quick"), state="blocked", stage="implement", jobs=1)
         flow, actions = step(flow, Event("retry"), POLICY)
-        self.assertIsNone(actions[0].payload["spec"]["expected_head"])
+        self.assertIsNone(actions[-1].payload["spec"]["expected_head"])
 
     def test_an_unknown_head_blocks_a_flow_at_a_gate_and_retry_adopts_it(self):
         flow = replace(new(), state="awaiting-gate:plan", stage="gate:plan", head=SHA, pr=3)
@@ -358,6 +367,72 @@ class BlockedTests(unittest.TestCase):
         self.assertEqual(flow.state, "blocked")
         flow, _ = step(flow, Event("retry", head=OTHER), POLICY)
         self.assertEqual((flow.state, flow.head), ("awaiting-gate:plan", OTHER))
+        self.assertFalse(flow.foreign_head)
+
+    def test_a_retry_for_another_reason_does_not_take_over_a_push(self):
+        flow = replace(running("implement"), state="blocked", reason="gates failed")
+        flow, actions = step(flow, Event("retry", head=OTHER), POLICY)
+        self.assertEqual(flow.head, SHA)
+        self.assertEqual(actions[-1].payload["spec"]["expected_head"], SHA)
+
+    def test_the_step_that_refused_a_head_lets_the_next_retry_adopt_it(self):
+        flow = running("review")
+        flow, _ = step(flow, finished(flow, "unknown-head"), POLICY)
+        self.assertTrue(flow.foreign_head)
+        flow, actions = step(flow, Event("retry", head=OTHER), POLICY)
+        self.assertEqual(actions[-1].payload["spec"]["expected_head"], OTHER)
+
+    def test_an_adopted_head_before_implement_needs_the_plan_approved_again(self):
+        flow = replace(running("implement"), state="blocked", foreign_head=True, pr=3)
+        flow, actions = step(flow, Event("retry", head=OTHER), POLICY)
+        self.assertEqual((flow.state, flow.head), ("awaiting-gate:plan", OTHER))
+        self.assertEqual(submitted(actions), [])
+
+    def test_an_adopted_head_in_quick_goes_on_with_the_step(self):
+        flow = replace(running("implement", "quick"), state="blocked", foreign_head=True)
+        self.assertEqual(step(flow, Event("retry", head=OTHER), POLICY)[0].state, "running:implement")
+
+    def test_retry_brings_back_a_pull_request_that_failed_to_open(self):
+        for stage, state in (("review", "running:review"), ("fix", "running:fix"), ("gate:merge", "awaiting-gate:merge")):
+            with self.subTest(stage=stage):
+                flow = replace(new("quick"), state="blocked", stage=stage, head=SHA, jobs=1)
+                flow, actions = step(flow, Event("retry"), POLICY)
+                self.assertEqual(flow.state, state)
+                self.assertEqual(kinds(actions)[0], "open_pr")
+
+    def test_retry_at_the_merge_gate_marks_it_ready_too(self):
+        flow = replace(new("quick"), state="blocked", stage="gate:merge", head=SHA)
+        self.assertEqual(kinds(step(flow, Event("retry"), POLICY)[1])[:2], ["open_pr", "mark_ready"])
+        self.assertEqual(kinds(step(replace(flow, pr=3), Event("retry"), POLICY)[1])[0], "mark_ready")
+
+    def test_retry_before_the_pull_request_stage_opens_none(self):
+        flow = replace(new("quick"), state="blocked", stage="implement")
+        self.assertNotIn("open_pr", kinds(step(flow, Event("retry"), POLICY)[1]))
+
+    def test_a_failed_action_during_a_job_cancels_the_job(self):
+        flow, actions = step(running("review"), Event("effect_failed", text="x"), POLICY)
+        self.assertEqual((flow.state, kinds(actions)), ("blocked", ["cancel_job", "report"]))
+
+    def test_the_label_follows_a_revise_and_a_retry(self):
+        flow = replace(new(), state="awaiting-gate:plan", stage="gate:plan", head=SHA)
+        self.assertIn("report", kinds(step(flow, Event("gate_rejected", actor=OWNER, commit=SHA), POLICY)[1]))
+        blocked = replace(running("review"), state="blocked")
+        self.assertIn("report", kinds(step(blocked, Event("retry"), POLICY)[1]))
+
+    def test_a_rejection_of_another_head_does_nothing_in_the_core_too(self):
+        flow = replace(new(), state="awaiting-gate:plan", stage="gate:plan", head=SHA)
+        self.assertEqual(step(flow, Event("gate_rejected", actor=OWNER, commit=OTHER), POLICY)[0], flow)
+
+    def test_too_many_restarts_block(self):
+        flow = running("implement")
+        for _ in range(F.MAX_RESTARTS):
+            flow, _a = step(flow, finished(flow, "restarted"), POLICY)
+        self.assertEqual(flow.state, "running:implement")
+        self.assertEqual(step(flow, finished(flow, "restarted"), POLICY)[0].state, "blocked")
+
+    def test_a_missing_head_is_not_adopted(self):
+        flow = replace(running("review"), state="blocked", foreign_head=True)
+        self.assertEqual(step(flow, Event("retry", head=None), POLICY)[0].head, SHA)
 
     def test_an_approval_does_not_unblock(self):
         flow = replace(new(), state="blocked", stage="gate:plan", head=SHA)
@@ -444,22 +519,26 @@ class FlowDbTests(unittest.TestCase):
         self.now += 30
         self.assertEqual(self.db.due()[0].tries, 1)
 
-    def test_abandon_closes_what_is_left(self):
+    def test_abandon_closes_what_was_left_and_keeps_what_the_transition_adds(self):
         self.db.create(new())
         self.db.commit(new(), new(), [Action("claim"), Action("report")], Event("start"))
-        self.db.abandon("abc", "stopped")
-        self.assertEqual(self.db.due(), [])
-        self.assertFalse(self.db.has_open("abc"))
+        blocked = replace(new(), state="blocked")
+        self.db.commit(new(), blocked, [Action("comment")], Event("effect_failed"), abandon="stopped")
+        self.assertEqual([a.kind for a in self.db.due()], ["comment"])
+        self.assertEqual(self.db.get("abc").state, "blocked")
 
     def test_marker_is_stable_for_a_replay(self):
         self.db.create(new())
         self.db.commit(new(), new(), [Action("comment", {"text": "x"})], Event("start"))
         self.assertEqual(self.db.due()[0].marker, self.db.due()[0].marker)
 
-    def test_commands_are_taken_once(self):
+    def test_a_command_stays_until_it_is_taken(self):
         self.db.add_command("abc", "retry")
-        self.assertEqual(self.db.take_commands(), [("abc", "retry")])
-        self.assertEqual(self.db.take_commands(), [])
+        (command, flow_id, kind), = self.db.commands()
+        self.assertEqual((flow_id, kind), ("abc", "retry"))
+        self.assertEqual(len(self.db.commands()), 1)
+        self.db.take_command(command)
+        self.assertEqual(self.db.commands(), [])
 
     def test_runs_and_history_are_kept(self):
         self.db.create(new())

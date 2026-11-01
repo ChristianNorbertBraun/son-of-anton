@@ -209,10 +209,15 @@ def run_claude(job: Job, should_cancel: Callable[[], bool], argv: list[str] | No
         raise RuntimeError(f"claude returned no JSON (exit {code})") from None
 
 
+CLOSING_WORD_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b", re.I)
+
+
 def neutralize(text: str) -> str:
     """Claude's summary may echo hostile issue text: no @-mentions, no #N links, no closing keywords."""
     text = scrub(str(text)[:SUMMARY_LIMIT]).replace("@", "@​")
     text = re.sub(r"#(\d+)", "#​\\1", text)
+    text = re.sub(r"\bGH-(\d+)", "GH-​\\1", text, flags=re.I)
+    text = CLOSING_WORD_RE.sub(lambda m: f"{m.group(0)[0]}​{m.group(0)[1:]}", text)  # also before a URL
     return text.strip() or "(no summary)"
 
 

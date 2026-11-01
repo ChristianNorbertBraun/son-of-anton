@@ -44,6 +44,8 @@ install = "npm ci --ignore-scripts --no-audit --no-fund"   # no postinstall scri
 protected_paths = ["gh-pages.js"]   # the lockfile is NOT protected: adding a dependency changes it
 allowed_authors = ["your-github-login"]   # ONLY issues by these logins, labelled by these logins, start jobs
 trigger_label = "anton"                   # state labels anton:queued / :running / :pr / :failed are managed
+# tracker = "github"                      # flows: an issue labelled flow:quick or flow:standard. Needs checks
+# private_check = false                   # flows refuse the lines of private-strings; off for a personal site
 
 [[repos."your-name/your-site".checks]]
 name = "build"
@@ -72,7 +74,10 @@ base = "main"
 allow_tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 -m unittest:*)",
                "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "WebSearch", "WebFetch"]
 protected_paths = ["anton/sandbox.py", "anton/config.py", "anton/gitops.py", "anton/ghapp.py",
-                   "anton/runner.py", "anton/selftest.py", "anton/tripwire.py"]
+                   "anton/runner.py", "anton/selftest.py", "anton/tripwire.py", "anton/steps.py",
+                   "anton/flow.py", "anton/conductor.py", "anton/prs.py", "anton/poller.py", "anton/github.py",
+                   "anton/workflows.py", "anton/ports.py", "anton/flowdb.py", "anton/bridge.py", "anton/queue.py",
+                   "anton/adapters/*"]
 allowed_authors = ["your-github-login"]
 trigger_label = "anton"
 

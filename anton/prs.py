@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from .config import RepoConfig
+from .workflows import FLOW_BRANCH_PREFIX
 
 SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,100}")
 
@@ -46,6 +47,8 @@ def inspect_pr(gh, repo: RepoConfig, number: int) -> PrInfo:
     ref = head.get("ref", "")
     if not safe_branch(ref):
         raise PrRefused(f"PR #{number} has an unusual branch name, refusing to push to it")
+    if ref.startswith(FLOW_BRANCH_PREFIX):  # a push here would pass a gate's head check by moving it
+        raise PrRefused(f"PR #{number} belongs to a running flow; only the flow itself pushes to it")
     default = (base.get("repo") or {}).get("default_branch") or repo.base
     if ref in (repo.base, default):
         raise PrRefused(f"PR #{number} is based on the default branch '{ref}' itself, refusing to push to it")

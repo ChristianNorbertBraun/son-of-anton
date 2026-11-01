@@ -20,6 +20,7 @@ from .prs import PrRefused, inspect_pr
 from .queue import FINAL, InputError, LimitError
 from .runner import ANSWER_LIMIT, safe, scrub
 from .service import Service
+from .workflows import is_flow_issue
 
 PROTOCOL = "2025-03-26"
 SUPPORTED = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -262,6 +263,8 @@ class Bridge:
         issue = self.gh_for(repo).issue(number)
         if "pull_request" in issue:
             raise ValueError("that is a pull request, not an issue")
+        if is_flow_issue(x.get("name", "") for x in issue.get("labels") or []):
+            raise ValueError("that issue belongs to a flow")
         self._trusted_author(repo, issue)
         row, created = self.service.submit(repo.slug, build_task(issue), number, who)
         return f"{'Queued' if created else 'Already active'}: job {row.id} for {repo.slug}#{number} ({row.status})"
@@ -302,6 +305,8 @@ class Bridge:
         current = gh.issue(number)
         if "pull_request" in current:
             raise ValueError("that is a pull request: use anton_comment or anton_update_pr")
+        if is_flow_issue(x.get("name", "") for x in current.get("labels") or []):  # its text is a work order
+            raise ValueError("that issue belongs to a flow: use anton_comment")
         fields: dict = {}
         if title is not None:
             fields["title"] = one_line(title)

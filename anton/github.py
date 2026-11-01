@@ -14,7 +14,8 @@ TOKEN_TTL = 45 * 60
 # issues: write (create, edit, comment, labels); pull requests and contents: read-only (inspect a PR and its branch)
 PERMISSIONS = {"issues": "write", "pull_requests": "read", "contents": "read"}
 # changing a pull request: a separate token, minted for each call and never cached
-PR_WRITE = {"pull_requests": "write", "metadata": "read"}
+PR_WRITE = {"pull_requests": "write"}
+EVENT_PAGES = 5
 STATES = ("queued", "running", "pr", "patch", "failed")
 COLORS = {"": "5319e7", "queued": "fbca04", "running": "0e8a16", "pr": "1d76db", "patch": "c5def5", "failed": "d93f0b"}
 
@@ -65,7 +66,7 @@ class GitHub:
         return self._pages(f"/issues/{int(number)}/comments")
 
     def reviews(self, number: int) -> list[dict]:
-        return self._pages(f"/pulls/{int(number)}/reviews")
+        return self._pages(f"/pulls/{int(number)}/reviews", 20)  # a flood of foreign reviews must not hide the owner's
 
     def review_comments(self, number: int) -> list[dict]:
         return self._pages(f"/pulls/{int(number)}/comments")
@@ -98,7 +99,7 @@ class GitHub:
 
     def events(self, number: int) -> list[dict]:
         out: list[dict] = []
-        for page in range(1, 6):  # oldest first; 500 events is far more than any normal issue
+        for page in range(1, EVENT_PAGES + 1):  # oldest first; 500 events is far more than any normal issue
             chunk = self._call("GET", f"/issues/{int(number)}/events?per_page=100&page={page}")
             out += chunk
             if len(chunk) < 100:

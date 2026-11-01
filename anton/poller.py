@@ -16,6 +16,7 @@ from .github import GitHub, state_labels
 from .queue import MAX_TASK_CHARS, InputError, JobRow, LimitError
 from .runner import safe, scrub
 from .service import Service
+from .workflows import is_flow_issue
 
 MAX_PER_POLL = 10
 
@@ -61,6 +62,9 @@ def poll_once(repo: RepoConfig, gh, service: Service, seen: set | None = None,
         if "pull_request" in issue:
             continue
         number = issue["number"]
+        if is_flow_issue(x.get("name", "") for x in issue.get("labels") or []):
+            ignore(number, "it belongs to a flow")
+            continue
         author = (issue.get("user") or {}).get("login", "")
         if author.lower() not in authors:
             ignore(number, f"author {safe(author, 40)!r} is not allowed")

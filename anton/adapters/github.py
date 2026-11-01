@@ -2,7 +2,7 @@
 in the core. Labels and comments use the issues token; changes to a pull request a write token minted per call."""
 from __future__ import annotations
 
-from ..github import GitHub
+from ..github import EVENT_PAGES, GitHub
 from ..poller import last_labeler
 from ..ports import AdapterError, Note, PrRef, PrState, Review, Task, has_marker, marked
 from ..workflows import LABEL_PREFIX, WORKFLOWS, flow_label
@@ -24,11 +24,16 @@ def login(item: dict) -> str | None:
     return (item.get("user") or {}).get("login")
 
 
+def written_by(comments: list[dict], bot: str, marker: str) -> bool:
+    """Only our own comments count: anyone can write a marker, and that would swallow a real report."""
+    return any((login(c) or "").lower() == bot.lower() and has_marker(c.get("body") or "", marker) for c in comments)
+
+
 class GitHubTracker:
     capabilities: set[str] = set()
 
-    def __init__(self, gh: GitHub):
-        self.gh = gh
+    def __init__(self, gh: GitHub, bot: str):
+        self.gh, self.bot = gh, bot
 
     def prepare(self) -> None:
         wanted = {**{f"{LABEL_PREFIX}{name}": FLOW_COLOR for name in WORKFLOWS},
@@ -39,7 +44,9 @@ class GitHubTracker:
     def _task(self, issue: dict, label: str | None = None) -> Task:
         labels = tuple((x.get("name") or "") for x in issue.get("labels") or [])
         number = issue["number"]
-        actor = last_labeler(self.gh.events(number), label) if label else None
+        events = self.gh.events(number) if label else []
+        # at the cap the newest events are missing, and the last labeler might be one of them
+        actor = last_labeler(events, label) if label and len(events) < EVENT_PAGES * 100 else None
         closed_by = (issue.get("closed_by") or {}).get("login")
         return Task(str(number), issue.get("title") or "", issue.get("body") or "", login(issue) or "", labels, actor,
                     issue.get("state") or "open", closed_by)
@@ -82,13 +89,13 @@ class GitHubTracker:
         self._comment(int(key), url, marker)
 
     def _comment(self, number: int, text: str, marker: str) -> None:
-        if not any(has_marker(c.get("body") or "", marker) for c in self.gh.issue_comments(number)):
+        if not written_by(self.gh.issue_comments(number), self.bot, marker):
             self.gh.comment(number, marked(text, marker))
 
 
 class GitHubCodeHost:
-    def __init__(self, gh: GitHub):
-        self.gh = gh
+    def __init__(self, gh: GitHub, bot: str):
+        self.gh, self.bot = gh, bot
 
     def head_of(self, branch: str) -> str | None:
         try:
@@ -98,11 +105,25 @@ class GitHubCodeHost:
                 return None
             raise
 
+    def pr_for(self, branch: str, base: str) -> PrRef | None:
+        for pr in self.gh.pulls_with_head(branch):
+            # anyone can open a pull request from a public branch: only ours may become the flow's
+            head, target = pr.get("head") or {}, pr.get("base") or {}
+            if ((login(pr) or "").lower() == self.bot.lower() and head.get("ref") == branch
+                    and target.get("ref") == base
+                    and ((head.get("repo") or {}).get("full_name") or "").lower() == self.gh.repo.slug.lower()):
+                return PrRef(pr["number"], pr.get("html_url") or "")
+        return None
+
     def open_draft_pr(self, branch: str, base: str, title: str, body: str) -> PrRef:
-        for pr in self.gh.pulls_with_head(branch):  # a replay after a crash finds the one it made
-            return PrRef(pr["number"], pr.get("html_url") or "")
+        found = self.pr_for(branch, base)  # a replay after a crash finds the one it made
+        if found:
+            return found
         pr = self.gh.write("POST", "/pulls", {"title": title, "head": branch, "base": base, "draft": True, "body": body})
         return PrRef(pr["number"], pr.get("html_url") or "")
+
+    def update_pr(self, pr: PrRef, title: str, body: str) -> None:
+        self.gh.write("PATCH", f"/pulls/{int(pr.number)}", {"title": title, "body": body})
 
     def _pull(self, number: int) -> dict:
         try:
@@ -123,7 +144,7 @@ class GitHubCodeHost:
                        bool(p.get("draft")), p.get("state") or "open", bool(p.get("merged")), reviews, notes)
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
-        if not any(has_marker(c.get("body") or "", marker) for c in self.gh.issue_comments(pr.number)):
+        if not written_by(self.gh.issue_comments(pr.number), self.bot, marker):
             self.gh.write("POST", f"/issues/{int(pr.number)}/comments", {"body": marked(text, marker)})
 
     def mark_ready(self, pr: PrRef) -> None:

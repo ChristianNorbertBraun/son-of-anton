@@ -99,11 +99,17 @@ class LocalCodeHost:
         except RuntimeError:
             return None
 
-    def open_draft_pr(self, branch: str, base: str, title: str, body: str) -> PrRef:
-        data = self.store.load()
-        for pr in data.values():
-            if pr["branch"] == branch:
+    def pr_for(self, branch: str, base: str) -> PrRef | None:
+        for pr in self.store.load().values():
+            if pr["branch"] == branch and pr["base"] == base:
                 return PrRef(pr["number"], pr["url"])
+        return None
+
+    def open_draft_pr(self, branch: str, base: str, title: str, body: str) -> PrRef:
+        found = self.pr_for(branch, base)
+        if found:
+            return found
+        data = self.store.load()
         if self.head_of(branch) is None:
             raise AdapterError(f"no branch {branch}")
         number = len(data) + 1
@@ -113,6 +119,11 @@ class LocalCodeHost:
                              "comments": []}
         self.store.save(data)
         return PrRef(number, url)
+
+    def update_pr(self, pr: PrRef, title: str, body: str) -> None:
+        data = self.store.load()
+        self._pr(data, pr.number).update(title=title, body=body)
+        self.store.save(data)
 
     def pr_state(self, pr: PrRef) -> PrState:
         p = self._pr(self.store.load(), pr.number)
@@ -145,6 +156,11 @@ class LocalCodeHost:
     def owner_note(self, pr: PrRef, actor: str, text: str, commit: str | None) -> None:
         data = self.store.load()
         self._pr(data, pr.number)["notes"].append(asdict(Note(actor, text, commit)))
+        self.store.save(data)
+
+    def owner_comment(self, pr: PrRef, text: str) -> None:
+        data = self.store.load()
+        self._pr(data, pr.number)["comments"].append(text)
         self.store.save(data)
 
     def owner_merge(self, pr: PrRef) -> None:

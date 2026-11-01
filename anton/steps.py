@@ -261,7 +261,7 @@ def run_plan(run: StepRun) -> Result:
         return Result("hard-path", reason=f"the plan step removed {PLAN_PATH}")
     if refused := run.refused(staged, title, str(result.get("result", ""))):
         return refused
-    gitops.git(["commit", "-q", "-m", f"Anton: {title}"], run.work, run.identity)
+    gitops.git(["commit", "-q", "-m", f"Anton: {runner.neutralize(title)}"], run.work, run.identity)
     return Result("ok", head=run.push(title, summary), title=title, summary=summary)
 
 
@@ -304,7 +304,8 @@ def run_gated(run: StepRun, prompt: str, fixes: int) -> Result:
             return Result("gates-failed", gates=lines, reason="no progress")
         if refused := run.refused(staged, title, str(result.get("result", ""))):
             return refused
-        gitops.git(["commit", "-q", "-m", f"Anton: {title}"], work, run.identity)
+        # a commit message is public text too, and a closing keyword in it would close another issue on merge
+        gitops.git(["commit", "-q", "-m", f"Anton: {runner.neutralize(title)}"], work, run.identity)
         after = runner.run_checks(job, f"attempt {attempt + 1}", run.should_cancel)
         ok, lines = chk.compare(baseline, after)
         run.checkpoint()

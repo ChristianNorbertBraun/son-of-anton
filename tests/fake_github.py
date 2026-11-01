@@ -5,6 +5,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 
 class FakeGitHub:
+    bot = "anton[bot]"
+
     def __init__(self, slug="example/repo"):
         self.slug, self.issues, self.pulls, self.branches, self.labels = slug, {}, {}, {}, set()
         self.tokens, self.calls, self.fail_graphql = [], [], None
@@ -73,7 +75,7 @@ class FakeGitHub:
         return self._page(self._issue(number).get("_comments", []), query)
 
     def add_comment(self, query, body, number):
-        self._issue(number).setdefault("_comments", []).append({"body": body["body"]})
+        self._issue(number).setdefault("_comments", []).append({"body": body["body"], "user": {"login": self.bot}})
         return {}
 
     def create_label(self, query, body):
@@ -89,6 +91,7 @@ class FakeGitHub:
         return {"name": name, "commit": {"sha": self.branches[name]}, "protected": False}
 
     def list_pulls(self, query, body):
+        assert query["state"] == ["all"]  # a replay must find a pull request that is closed by now
         owner, _, branch = query["head"][0].partition(":")
         return [p for p in self.pulls.values() if p["head"]["ref"] == branch and owner == self.slug.split("/")[0]]
 
@@ -100,8 +103,9 @@ class FakeGitHub:
         self.issues[number] = {"number": number, "pull_request": {}, "labels": [], "state": "open", "_comments": []}
         self.pulls[number] = {"number": number, "html_url": f"https://example.com/pull/{number}", "draft": True,
                               "state": "open", "merged": False, "node_id": f"PR_{number}", "title": body["title"],
-                              "body": body["body"], "head": {"ref": body["head"], "sha": self.branches[body["head"]]},
-                              "_reviews": [], "_comments": []}
+                              "body": body["body"], "user": {"login": self.bot}, "base": {"ref": body["base"]},
+                              "head": {"ref": body["head"], "sha": self.branches[body["head"]],
+                                       "repo": {"full_name": self.slug}}, "_reviews": [], "_comments": []}
         return self.pulls[number]
 
     def get_pull(self, query, body, number):
@@ -168,9 +172,27 @@ class FakeGitHub:
         self.pulls[pr.number]["_reviews"].append({"user": {"login": actor}, "state": state.upper(), "commit_id": commit,
                                                   "body": text})
 
+    def add_foreign_pull(self, branch, author="stranger", base="main", head_repo=None):
+        number = self.next_number
+        self.next_number += 1
+        self.issues[number] = {"number": number, "pull_request": {}, "labels": [], "state": "open", "_comments": []}
+        self.pulls[number] = {"number": number, "html_url": f"https://example.com/foreign/{number}", "draft": False,
+                              "state": "open", "merged": False, "node_id": f"PR_{number}", "title": "Foreign", "body": "",
+                              "user": {"login": author}, "base": {"ref": base},
+                              "head": {"ref": branch, "sha": self.branches[branch],
+                                       "repo": {"full_name": head_repo or self.slug}}, "_reviews": [], "_comments": []}
+        return number
+
+    def add_foreign_comment(self, number, body):
+        self.issues[int(number)]["_comments"].append({"body": body, "user": {"login": "stranger"}})
+
     def add_note(self, pr, actor, text, commit):
         self.pulls[pr.number]["_comments"].append({"user": {"login": actor}, "body": text, "commit_id": "moved-on",
                                                    "original_commit_id": commit})
+
+    def pr_text(self, pr):
+        pull = self.pulls[pr.number]
+        return pull["title"], pull["body"]
 
     def merge(self, pr):
         self.pulls[pr.number].update(state="closed", merged=True)
