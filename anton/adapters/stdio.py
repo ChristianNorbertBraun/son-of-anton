@@ -5,10 +5,12 @@
     {"id": 2, "error": {"kind": "adapter", "message": "no task 7"}}
 
 The methods are those of ports.TrackerAdapter and ports.CodeHostAdapter, with dataclasses as objects and tuples as
-lists: `mark_draft` and `is_draft` answer true or false, `last_draft_mark` [kind, actor] or null. An adapter runs
-outside the sandbox and holds its tracker's token: it is trusted code, and nothing installs one by itself. A program
-that dies is started again for the next request. Requests are not repeated by this layer: the outbox does that, and
-the methods are idempotent."""
+lists: `mark_draft` and `is_draft` answer true or false, `last_draft_mark` [kind, actor] or null. Each review in
+`pr_state` has an `id`: the host's own, a non-empty string without ":", so two reviews alike in all else stay two.
+
+An adapter runs outside the sandbox and holds its tracker's token: it is trusted code, and nothing installs one by
+itself. A program that dies is started again for the next request. Requests are not repeated by this layer: the outbox
+does that, and the methods are idempotent."""
 from __future__ import annotations
 
 import json
@@ -92,9 +94,17 @@ def as_task(data: dict) -> Task:
     return Task(**{**data, "labels": tuple(data.get("labels") or ())})
 
 
+def as_review(data: dict) -> Review:
+    review = Review(**data)
+    if not (isinstance(review.id, str) and review.id and ":" not in review.id):
+        raise AdapterError("the adapter's review has no usable id")
+    return review
+
+
 def as_pr_state(data: dict) -> PrState:
     return PrState(PrRef(**data["ref"]), data["head"], data["draft"], data["state"], data["merged"],
-                   tuple(Review(**r) for r in data.get("reviews") or ()), tuple(Note(**n) for n in data.get("notes") or ()))
+                   tuple(as_review(r) for r in data.get("reviews") or ()),
+                   tuple(Note(**n) for n in data.get("notes") or ()))
 
 
 def as_mark(data) -> tuple[str, str] | None:

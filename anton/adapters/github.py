@@ -167,11 +167,14 @@ class GitHubCodeHost:
         nodes = (found.get("timelineItems") or {}).get("nodes") or []
         if not nodes or nodes[-1].get("__typename") not in DRAFT_MARKS:
             return None
+        kind = DRAFT_MARKS[nodes[-1]["__typename"]]
+        if kind == "ready" and found.get("isDraft"):  # whatever the marks say, a draft is no Ready
+            return "draft", ""
         actor = nodes[-1].get("actor") or {}
         who = actor.get("login") or ""
         if who and actor.get("__typename") == "Bot" and not who.lower().endswith("[bot]"):
             who += "[bot]"
-        return DRAFT_MARKS[nodes[-1]["__typename"]], who
+        return kind, who
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
         if not written_by(self.gh.issue_comments(pr.number), self.bot, marker):

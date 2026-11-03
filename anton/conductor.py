@@ -319,7 +319,9 @@ class Conductor:
                            self.pr_body(flow, action.payload))
             host.mark_ready(ref)
         elif action.kind == "mark_draft":
-            if flow.terminal:
+            # entering the plan gate clears draft_checked in the commit that queues this action: set, it has run, and
+            # a replay must not undo a Ready the owner clicked since
+            if flow.terminal or flow.draft_checked:
                 return
             if ref is None:
                 raise RuntimeError("no pull request to mark as a draft")

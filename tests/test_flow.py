@@ -452,6 +452,8 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual((flow.state, flow.stage), ("blocked", "rework"))
         flow, actions = step(flow, Event("retry"), POLICY)
         self.assertEqual((flow.state, submitted(actions)), ("awaiting-gate:merge", []))
+        self.assertEqual(kinds(actions), ["mark_ready", "comment", "report"])
+        self.assertIn("does not repeat the rework", actions[1].payload["text"])
         self.assertEqual(step(flow, rejected, POLICY), (flow, []))  # the old review stays answered
         old = Review(OWNER, "changes_requested", SHA, "Rename it", "1")
         flow = replace(flow, noted=(review_key(OWNER, SHA, "changes_requested", "1"),))

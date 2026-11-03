@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.adapters.local import LocalCodeHost, LocalTracker
-from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_mark
+from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_mark, as_pr_state
+from anton.ports import PrRef
 from anton.ports import AdapterError
 
 from .kit import Contract
@@ -80,6 +81,21 @@ class ClientTests(Base, unittest.TestCase):
         for bad in (["ready"], ["ready", "alice", "x"], ["ready", None], "ready", 5, {}):
             with self.subTest(bad=bad), self.assertRaises(AdapterError):
                 as_mark(bad)
+
+    def test_a_review_without_a_usable_id_is_an_error(self):
+        data = {"ref": {"number": 1}, "head": "a" * 40, "draft": False, "state": "open", "merged": False}
+        review = {"actor": "alice", "state": "approved", "commit": "a" * 40, "text": ""}
+        self.assertEqual(as_pr_state({**data, "reviews": [{**review, "id": "7"}]}).reviews[0].id, "7")
+        for bad in ({}, {"id": ""}, {"id": 7}, {"id": None}, {"id": "a:b"}):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                as_pr_state({**data, "reviews": [{**review, **bad}]})
+
+    def test_is_draft_takes_only_a_boolean(self):
+        for answer, expected in ((True, True), (False, False)):
+            self.assertIs(StdioCodeHost(SimpleNamespace(call=lambda *a, x=answer, **k: x)).is_draft(PrRef(1)), expected)
+        for bad in ("false", "true", 0, 1, None, []):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                StdioCodeHost(SimpleNamespace(call=lambda *a, x=bad, **k: x)).is_draft(PrRef(1))
 
     def test_a_flood_is_cut_off(self):
         client = StdioClient([sys.executable, "-c",

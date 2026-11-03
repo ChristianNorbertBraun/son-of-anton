@@ -183,6 +183,19 @@ class GitHubSpecificTests(unittest.TestCase):
         self.fake.mark_draft_by(pr, "helper[bot]")
         self.assertEqual(self.host.last_draft_mark(pr), ("draft", "helper[bot]"))
 
+    def test_a_draft_is_a_draft_whatever_the_marks_say(self):
+        pr = self.opened()
+        self.fake.mark_ready_by(pr, "owner")
+        self.fake.pulls[pr.number]["draft"] = True  # GraphQL says draft, the newest mark says ready
+        self.assertEqual(self.host.last_draft_mark(pr), ("draft", ""))
+
+    def test_an_unexpected_node_is_no_mark(self):
+        for node in ({"__typename": "LabeledEvent", "actor": {"__typename": "User", "login": "owner"}}, {}):
+            with self.subTest(node=node):
+                gh = SimpleNamespace(repo=SimpleNamespace(slug="example/repo"), read_graphql=lambda q, v, n=node: {
+                    "repository": {"pullRequest": {"isDraft": False, "timelineItems": {"nodes": [n]}}}})
+                self.assertIsNone(GitHubCodeHost(gh, "anton[bot]").last_draft_mark(PrRef(1)))
+
     def test_many_events_do_not_hide_the_newest_mark(self):
         pr = self.opened()
         self.fake.issues[pr.number]["_events"] = [{"event": "labeled", "actor": {"login": "x"}}] * 900

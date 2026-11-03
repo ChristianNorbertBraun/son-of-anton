@@ -325,6 +325,31 @@ class CrashTests(Rig):
         self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
         self.assertEqual([k for k, _ in self.host.details(self.pr_ref())["draft_events"]].count("draft"), 1)
 
+    def test_a_replayed_mark_draft_does_not_undo_a_ready_clicked_since(self):
+        flow = self.standard_to_plan_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Shorter")
+        real_finish, last, hit = self.db.finish, [], []
+
+        def effect(flow, action, real=self.conductor.effect):
+            real(flow, action)
+            last.append(action.kind)
+
+        def finish(action_id, error=None):
+            if last and last[-1] == "mark_draft" and not hit:  # draft_marked is applied, the action is not done
+                hit.append(1)
+                self.host.owner_ready(self.pr_ref(), OWNER)  # the owner is quicker than the replay
+                self.conductor = self.new_conductor()
+                raise RuntimeError("crash")
+            real_finish(action_id, error)
+        self.conductor.effect = effect
+        self.db.finish = finish
+        self.settle(write(steps.PLAN_PATH, "shorter plan\n"), write("new.txt"), CLEAN)
+        self.assertTrue(hit)
+        self.assertEqual(self.flow().state, "awaiting-gate:merge")
+        self.assertFalse(any(READY_AGAIN[:40] in c for c in self.host.comments(self.pr_ref())))
+        marks = [k for k, _ in self.host.details(self.pr_ref())["draft_events"]]
+        self.assertEqual(marks.count("draft"), 0)
+
     def test_a_crash_between_the_comment_and_the_conversion_comments_once_and_converts_once(self):
         flow = self.standard_to_plan_gate()
         self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Shorter")

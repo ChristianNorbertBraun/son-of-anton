@@ -415,11 +415,15 @@ def on_retry(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Actio
     stage = flow.stage
     if adopted and stage == "implement" and "gate:plan" in WORKFLOWS[flow.workflow].stages:
         stage = "gate:plan"
-    if stage == "rework":  # its review is answered: the owner's next one says what to change now
+    was_rework = stage == "rework"
+    if was_rework:  # its review is answered: the owner's next one says what to change now
         stage = "gate:merge"
     flow = replace(flow, retries=0, revisions=0, reworks=0, restarts=0, reason="", foreign_head=False, stage=stage,
                    head=event.head if adopted else flow.head)
     fixes = repairs(flow)
+    if was_rework:
+        fixes.append(Action("comment", {"text": "The retry does not repeat the rework: request changes again to start "
+                                                "another round."}))
     if stage.startswith("gate:"):
         flow, actions = enter(flow, stage)
         return flow, [*fixes, *actions]
