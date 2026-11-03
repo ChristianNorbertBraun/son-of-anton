@@ -15,7 +15,7 @@ from typing import Callable
 
 from . import runner, tripwire
 from .config import RepoConfig, Settings
-from .flow import Event, Flow, Policy, classify, close_event, gate_event, step
+from .flow import Event, Flow, Policy, classify, close_event, gate_events, step
 from .flowdb import FlowDb, Pending
 from .ports import AdapterError, CodeHostAdapter, PrRef, Task, TrackerAdapter
 from .queue import ACTIVE, FINAL, MAX_TASK_CHARS, InputError, JobRow, LimitError, Queue
@@ -26,6 +26,8 @@ from .workflows import LABEL_PREFIX, flow_label
 
 STALL_MARGIN = 15 * 60  # a step ends by itself after STEP_SECONDS: past this one, nothing is watching it any more
 MAX_TRIES = 6
+READY_AGAIN = ("This pull request was marked ready for review before the current version of the plan was up, so it is "
+               "a draft again. Read the plan, then click **Ready for review** again to start the work.")
 OUTAGE_RE = re.compile(r": (?:429|5\d\d) |rate limit", re.I)
 MAX_PASSES = 50  # actions of one flow run in order: one pass per action, or a start would take several ticks
 BASE_DELAY = 60
@@ -179,10 +181,10 @@ class Conductor:
             self.apply(flow, Event("effect_failed", text="the flow is at a gate without a pull request"))
         elif pr.head != flow.head:
             self.apply(flow, Event("head_moved", commit=pr.head))
-        elif flow.stage == "gate:plan":
-            event = gate_event(flow, pr, self.policy(self.repo_of(flow)))
-            if event:
-                self.apply(flow, event)
+        else:
+            for event in gate_events(flow, pr, self.policy(self.repo_of(flow))):
+                if self.apply(flow, event) != flow:
+                    return  # one step per look: what it started comes first, the rest is still there next time
 
     def read_job(self, flow: Flow) -> Flow:
         job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
@@ -312,14 +314,26 @@ class Conductor:
             host.update_pr(ref, self.pr_title(flow, action.payload.get("title") or ""),  # it says what was planned
                            self.pr_body(flow, action.payload))
             host.mark_ready(ref)
+        elif action.kind == "mark_draft":
+            if flow.terminal:
+                return
+            if ref is None:
+                raise RuntimeError("no pull request to mark as a draft")
+            # the comment first, under the action's marker: a replay after a crash still finds a ready PR and posts it
+            # once, and one after the mark finds a draft and posts nothing
+            if not host.pr_state(ref).draft:
+                host.comment(ref, self.outbound(flow, READY_AGAIN, "a comment"), action.marker)
+            if host.mark_draft(ref):
+                self.log(f"flow {flow.id}: Ready came before this plan, the pull request is a draft again")
         elif action.kind == "report":
             self.report(flow, tracker, action)
         elif action.kind == "comment":
             text = self.outbound(flow, action.payload["text"], "a comment")
+            marker = action.payload.get("marker") or action.marker  # about one review: posted once, whatever happens
             if ref:
-                host.comment(ref, text, action.marker)
+                host.comment(ref, text, marker)
             else:
-                tracker.link(flow.key, text, action.marker)
+                tracker.link(flow.key, text, marker)
         elif action.kind == "cancel_job":
             job = self.queue.step_job(flow.id, flow.stage, flow.jobs)
             if job is not None:

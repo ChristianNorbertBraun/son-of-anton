@@ -4,7 +4,7 @@ from dataclasses import replace
 from unittest import mock
 
 from anton import config, flow as F, runner, steps
-from anton.conductor import MAX_TRIES, STALL_MARGIN, brief_of
+from anton.conductor import MAX_TRIES, READY_AGAIN, STALL_MARGIN, brief_of
 from anton.config import ConfigError
 from anton.models import Outcome
 from anton.pool import Pool
@@ -55,7 +55,7 @@ class WholeFlowTests(Rig):
         self.assertTrue(self.pr().draft)
         self.assertEqual(self.tracker.state_of("7"), "awaiting-plan-review")
         self.assertIn(steps.PLAN_PATH, self.remote_files(flow.branch))
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)
+        self.host.owner_ready(self.pr_ref(), OWNER)
         self.settle(write("new.txt"), CLEAN)
         flow = self.flow()
         self.assertEqual(flow.state, "awaiting-gate:merge")
@@ -74,12 +74,76 @@ class WholeFlowTests(Rig):
         self.assertEqual((after.state, after.pr), ("awaiting-gate:plan", number))
         self.assertNotEqual(after.head, flow.head)
         self.assertIn("Use sqlite", claude.prompts[0])
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)  # the old head
-        self.settle()
-        self.assertEqual(self.flow().state, "awaiting-gate:plan")
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", after.head)
+        self.assertTrue(self.pr().draft)
+        self.host.owner_ready(self.pr_ref(), OWNER)
         self.settle(write("new.txt"), CLEAN)
         self.assertEqual(self.flow().state, "awaiting-gate:merge")
+
+    def test_standard_with_every_gate_from_label_to_merge(self):
+        """revise, Ready, implement, merge gate, Request changes, rework, Approve, merge."""
+        flow = self.standard_to_plan_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Use sqlite")
+        self.settle(write(steps.PLAN_PATH, "better plan\n"))
+        self.assertEqual(self.flow().state, "awaiting-gate:plan")
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        self.settle(write("new.txt"), CLEAN)
+        flow = self.flow()
+        self.assertEqual((flow.state, self.tracker.state_of("7")), ("awaiting-gate:merge", "pr"))
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertIn("Rename it", claude.prompts[0])
+        self.assertIn("Review the change", claude.prompts[1])
+        after = self.flow()
+        self.assertEqual((after.state, after.reworks, after.pr), ("awaiting-gate:merge", 1, flow.pr))
+        self.assertNotEqual(after.head, flow.head)
+        self.assertEqual([r.stage for r in self.db.runs(after.id)],
+                         ["plan", "revise", "implement", "review", "cleanup", "rework", "review", "cleanup"])
+        self.assertFalse(self.pr().draft)
+        self.assertEqual(self.tracker.state_of("7"), "pr")
+        self.host.owner_review(self.pr_ref(), OWNER, "approved", after.head)
+        self.settle()
+        self.assertEqual((self.flow().state, self.tracker.state_of("7")), ("awaiting-gate:merge", "approved"))
+        self.assertEqual(sorted(self.remote_files(after.branch)), ["app.txt", "new.txt", "renamed.txt"])
+        self.host.owner_merge(self.pr_ref())
+        self.conductor.tick()
+        self.assertEqual((self.flow().state, self.tracker.state_of("7")), ("done", "done"))
+
+    def test_quick_merge_gate_rework_then_merge(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertEqual(len(claude.prompts), 2)
+        after = self.flow()
+        self.assertEqual((after.state, after.reworks), ("awaiting-gate:merge", 1))
+        self.assertEqual([r.stage for r in self.db.runs(after.id)], ["implement", "review", "rework", "review"])
+        self.assertEqual(self.host.details(self.pr_ref())["title"], "Anton: Change things")
+        self.host.owner_merge(self.pr_ref())
+        self.conductor.tick()
+        self.assertEqual(self.flow().state, "done")
+
+    def test_ready_clicked_during_a_revision_is_undone_once_and_then_counts(self):
+        flow = self.standard_to_plan_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Shorter")
+        self.conductor.tick()
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        self.settle(write(steps.PLAN_PATH, "shorter plan\n"))
+        self.assertEqual(self.flow().state, "awaiting-gate:plan")
+        self.assertTrue(self.pr().draft)
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        self.settle(write("new.txt"), CLEAN)
+        self.assertEqual(self.flow().state, "awaiting-gate:merge")
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
+
+    def test_a_review_on_an_older_commit_gets_one_comment(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "approved", "0" * 40)
+        self.settle()
+        self.settle()
+        stale = [c for c in self.host.comments(self.pr_ref()) if "older commit" in c]
+        self.assertEqual(len(stale), 1)
+        self.assertIn("0" * 12, stale[0])
+        self.assertEqual((self.flow().state, self.tracker.state_of("7")), ("awaiting-gate:merge", "pr"))
 
     def test_a_broken_change_loops_three_times_then_blocks_and_pushes_nothing(self):
         self.tracker.owner_add("7")
@@ -169,7 +233,7 @@ class CrashTests(Rig):
         self.settle(write(steps.PLAN_PATH, "plan\n"))
         flow = self.flow()
         self.assertEqual(flow.state, "awaiting-gate:plan")
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)
+        self.host.owner_ready(self.pr_ref(), OWNER)
         self.settle(lambda work: None)
         flow = self.flow()
         self.assertEqual(flow.state, "blocked")
@@ -184,6 +248,48 @@ class CrashTests(Rig):
         self.assertEqual(len([c for c in comments if c.startswith("Blocked")]), 1)
         self.assertEqual(len([c for c in comments if c.startswith("Cancelled")]), 1)
         return bool(hit)
+
+    def crash_once_after(self, kind):
+        """The action runs, then the process dies before it is marked done: a new conductor finds it again."""
+        real_finish, last, hit = self.db.finish, [], []
+
+        def effect(flow, action, real=self.conductor.effect):
+            real(flow, action)
+            last.append(action.kind)
+
+        def finish(action_id, error=None):
+            if last and last[-1] == kind and not hit:
+                hit.append(1)
+                self.conductor = self.new_conductor()
+                raise RuntimeError("crash")
+            real_finish(action_id, error)
+        self.conductor.effect = effect
+        self.db.finish = finish
+        return hit
+
+    def test_mark_draft_replays_without_a_second_comment(self):
+        flow = self.standard_to_plan_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Shorter")
+        self.conductor.tick()
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        hit = self.crash_once_after("mark_draft")
+        self.settle(write(steps.PLAN_PATH, "shorter plan\n"))
+        self.assertTrue(hit)
+        self.assertEqual(self.flow().state, "awaiting-gate:plan")
+        self.assertTrue(self.pr().draft)
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
+        self.assertEqual([k for k, _ in self.pr().draft_events].count("draft"), 1)
+
+    def test_a_rework_replays_without_a_second_job(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it")
+        hit = self.crash_once_after("submit_step")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertTrue(hit)
+        after = self.flow()
+        self.assertEqual((after.state, after.reworks), ("awaiting-gate:merge", 1))
+        self.assertEqual([r.stage for r in self.db.runs(after.id)].count("rework"), 1)
+        self.assertEqual(len(claude.prompts), 2)
 
     def test_a_new_conductor_goes_on_where_the_last_one_stopped(self):
         self.tracker.owner_add("7")
@@ -438,7 +544,7 @@ class EffectTests(Rig):
     def test_a_pull_request_says_what_was_done_when_it_is_ready(self):
         flow = self.standard_to_plan_gate()
         self.assertIn("not run yet", self.host.details(self.pr_ref())["body"])
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)
+        self.host.owner_ready(self.pr_ref(), OWNER)
 
         def titled(work):
             write("new.txt")(work)
@@ -458,7 +564,7 @@ class EffectTests(Rig):
 
     def test_a_gate_does_not_look_at_the_pull_request_while_actions_are_open(self):
         flow = self.standard_to_plan_gate()
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)
+        self.host.owner_ready(self.pr_ref(), OWNER)
         self.db.commit(flow, flow, [F.Action("comment", {"text": "x"}, delay=1000)], F.Event("start"))
         self.conductor.tick()
         self.assertEqual(self.flow().state, "awaiting-gate:plan")
@@ -624,7 +730,7 @@ class EndingTests(Rig):
     def test_a_close_that_counts_for_nothing_does_not_freeze_the_gate(self):
         flow = self.standard_to_plan_gate()
         self.tracker.owner_close("7", "anton[bot]")
-        self.host.owner_review(self.pr_ref(), OWNER, "approved", flow.head)
+        self.host.owner_ready(self.pr_ref(), OWNER)
         self.conductor.tick()
         self.assertEqual(self.flow().state, "running:implement")
 

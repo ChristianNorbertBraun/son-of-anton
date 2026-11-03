@@ -12,7 +12,7 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .flow import Flow
+from .flow import MAX_REWORKS, Flow
 from .flowdb import FlowDb
 from .workflows import WORKFLOWS
 
@@ -39,7 +39,9 @@ def pip_states(flow: Flow) -> list[tuple[str, str]]:
     """(stage, done|now|stopped|todo) for what a person cares about: `pr` and `ready` take no time and can fail
     only as a blocked flow."""
     stages = [s for s in WORKFLOWS[flow.workflow].stages if s not in ("pr", "ready")]
-    current = {"fix": "review", "revise": "gate:plan"}.get(flow.stage, flow.stage)
+    # a rework round takes the place of implement: changes requested at the merge gate run through the same steps
+    current = {"fix": "review", "revise": "gate:plan", "rework": "implement"}.get(flow.stage, flow.stage)
+    names = {"implement": f"rework {flow.reworks}/{MAX_REWORKS}"} if flow.reworks else {}
     position = stages.index(current) if current in stages else -1
     out = []
     for i, stage in enumerate(stages):
@@ -49,7 +51,7 @@ def pip_states(flow: Flow) -> list[tuple[str, str]]:
             state = "stopped" if flow.kind in ("blocked", "cancelled", "cancelling") else "now"
         else:
             state = "todo"
-        name = flow.stage if i == position and flow.stage in ("fix", "revise") else stage
+        name = flow.stage if i == position and flow.stage in ("fix", "revise") else names.get(stage, stage)
         out.append((name.removeprefix("gate:") + (" gate" if stage.startswith("gate:") else ""), state))
     return out
 

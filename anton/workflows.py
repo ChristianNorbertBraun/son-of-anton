@@ -1,7 +1,8 @@
 """Built-in workflows. Plain data of the shape TOML workflows will have: a list of stages, run in order.
 
 A stage is a step job (plan, implement, review, cleanup), `pr` (open the draft PR), `ready` (mark it ready) or
-`gate:<name>` (wait for the owner). `fix` and `revise` are no stages: they are detours back into the list."""
+`gate:<name>` (wait for the owner). `fix`, `revise` and `rework` are no stages: they are detours back into the
+list."""
 from __future__ import annotations
 
 import re
