@@ -135,6 +135,51 @@ class WholeFlowTests(Rig):
         self.assertEqual(self.flow().state, "awaiting-gate:merge")
         self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
 
+    def test_a_rework_that_changes_nothing_goes_back_to_the_gate_and_the_next_review_counts(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Make it nicer")
+        self.settle(lambda work: None)
+        self.assertEqual((self.flow().state, self.flow().head), ("awaiting-gate:merge", flow.head))
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if "rework changed nothing" in c]), 1)
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename the function to run")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertIn("Rename the function to run", claude.prompts[0])
+        self.assertEqual((self.flow().state, self.flow().reworks), ("awaiting-gate:merge", 2))
+        self.assertNotEqual(self.flow().head, flow.head)
+
+    def test_retry_of_a_blocked_rework_waits_for_the_next_review(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it")
+        self.settle(*[lambda work, n=n: write("broken", f"{n}\n")(work) for n in range(4)])
+        self.assertEqual((self.flow().state, self.flow().stage), ("blocked", "rework"))
+        self.db.add_command(flow.id, "retry")
+        claude = self.settle(write("x.txt"))
+        self.assertEqual(claude.prompts, [])
+        self.assertEqual(self.flow().state, "awaiting-gate:merge")
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it, keep the old name")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertIn("keep the old name", claude.prompts[0])
+        self.assertEqual((self.flow().state, self.flow().reworks), ("awaiting-gate:merge", 1))
+
+    def test_the_draft_mark_is_read_only_at_an_armed_plan_gate_with_a_ready_pull_request(self):
+        calls = []
+        real = self.host.last_draft_mark
+
+        def counted(pr):
+            calls.append(pr)
+            return real(pr)
+        with mock.patch.object(self.host, "last_draft_mark", side_effect=counted):
+            flow = self.standard_to_plan_gate()
+            self.settle()
+            self.assertEqual(calls, [])  # a draft: nothing to read
+            self.host.owner_ready(self.pr_ref(), OWNER)
+            self.settle(write("new.txt"), CLEAN)
+            self.assertEqual(self.flow().state, "awaiting-gate:merge")
+            seen = len(calls)
+            self.settle()
+            self.assertEqual(len(calls), seen)  # not at the merge gate
+        self.assertEqual(seen, 1)
+
     def test_a_review_on_an_older_commit_gets_one_comment(self):
         flow = self.quick_to_merge_gate()
         self.host.owner_review(self.pr_ref(), OWNER, "approved", "0" * 40)
@@ -278,7 +323,29 @@ class CrashTests(Rig):
         self.assertEqual(self.flow().state, "awaiting-gate:plan")
         self.assertTrue(self.pr().draft)
         self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
-        self.assertEqual([k for k, _ in self.pr().draft_events].count("draft"), 1)
+        self.assertEqual([k for k, _ in self.host.details(self.pr_ref())["draft_events"]].count("draft"), 1)
+
+    def test_a_crash_between_the_comment_and_the_conversion_comments_once_and_converts_once(self):
+        flow = self.standard_to_plan_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Shorter")
+        self.conductor.tick()
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        real, calls = self.host.mark_draft, []
+
+        def dies_once(pr):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("crash")  # the comment is out, the PR is still ready
+            return real(pr)
+        with mock.patch.object(self.host, "mark_draft", side_effect=dies_once):
+            self.settle(write(steps.PLAN_PATH, "shorter plan\n"))
+            self.now += 10_000
+            self.settle()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((self.flow().state, self.flow().draft_checked), ("awaiting-gate:plan", True))
+        self.assertTrue(self.pr().draft)
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
+        self.assertEqual([k for k, _ in self.host.details(self.pr_ref())["draft_events"]].count("draft"), 1)
 
     def test_a_rework_replays_without_a_second_job(self):
         flow = self.quick_to_merge_gate()

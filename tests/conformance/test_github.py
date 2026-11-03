@@ -168,19 +168,41 @@ class GitHubSpecificTests(unittest.TestCase):
         self.assertFalse(self.host.mark_draft(pr))
         self.assertFalse(any(path == "/graphql" for _, path, _ in self.fake.calls[calls:]))
 
-    def test_draft_events_come_from_the_issue_events_with_their_actor(self):
+    def test_the_last_draft_mark_skips_other_events_and_a_deleted_actor_is_nobody(self):
         pr = self.opened()
         self.fake.issues[pr.number]["_events"] = [
-            {"event": "labeled", "actor": {"login": "owner"}},
             {"event": "ready_for_review", "actor": {"login": "owner"}},
             {"event": "convert_to_draft", "actor": None},
             {"event": "review_requested", "actor": {"login": "owner"}}]
-        self.assertEqual(self.host.pr_state(pr).draft_events, (("ready", "owner"), ("draft", "")))
+        self.assertEqual(self.host.last_draft_mark(pr), ("draft", ""))
 
-    def test_at_the_event_cap_the_last_word_is_a_draft_by_nobody(self):
+    def test_a_bot_gets_its_suffix_back(self):
         pr = self.opened()
-        self.fake.issues[pr.number]["_events"] = [{"event": "ready_for_review", "actor": {"login": "owner"}}] * 500
-        self.assertEqual(self.host.pr_state(pr).draft_events[-1], ("draft", ""))
+        self.host.mark_ready(pr)  # GraphQL names the App "anton", REST "anton[bot]"
+        self.assertEqual(self.host.last_draft_mark(pr), ("ready", "anton[bot]"))
+        self.fake.mark_draft_by(pr, "helper[bot]")
+        self.assertEqual(self.host.last_draft_mark(pr), ("draft", "helper[bot]"))
+
+    def test_many_events_do_not_hide_the_newest_mark(self):
+        pr = self.opened()
+        self.fake.issues[pr.number]["_events"] = [{"event": "labeled", "actor": {"login": "x"}}] * 900
+        self.fake.mark_ready_by(pr, "owner")
+        self.assertEqual(self.host.last_draft_mark(pr), ("ready", "owner"))
+
+    def test_the_last_draft_mark_is_read_with_the_read_token(self):
+        pr = self.opened()
+        calls = len(self.fake.calls)
+        self.host.last_draft_mark(pr)
+        self.host.is_draft(pr)
+        tokens = [token for _, _, token in self.fake.calls[calls:]]
+        self.assertTrue(tokens)
+        self.assertTrue(all(self.fake.permissions_of(t) == PERMISSIONS for t in tokens))
+
+    def test_the_draft_marks_are_not_read_for_every_look_at_the_pull_request(self):
+        pr = self.opened()
+        calls = len(self.fake.calls)
+        self.host.pr_state(pr)
+        self.assertFalse(any(path == "/graphql" or "/events" in path for _, path, _ in self.fake.calls[calls:]))
 
     def test_a_server_error_is_not_read_as_not_found(self):
         self.fake.api = mock.Mock(side_effect=RuntimeError("GitHub API GET /x: 500 b'boom'"))

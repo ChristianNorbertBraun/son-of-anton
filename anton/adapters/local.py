@@ -130,8 +130,14 @@ class LocalCodeHost:
         p = self._pr(self.store.load(), pr.number)
         head = p.get("merged_head") or self.head_of(p["branch"]) or ""
         return PrState(PrRef(p["number"], p["url"]), head, p["draft"], p["state"], p["merged"],
-                       tuple(Review(**r) for r in p["reviews"]), tuple(Note(**n) for n in p["notes"]),
-                       tuple((kind, actor) for kind, actor in p.get("draft_events", [])))
+                       tuple(Review(**r) for r in p["reviews"]), tuple(Note(**n) for n in p["notes"]))
+
+    def is_draft(self, pr: PrRef) -> bool:
+        return self._pr(self.store.load(), pr.number)["draft"]
+
+    def last_draft_mark(self, pr: PrRef) -> tuple[str, str] | None:
+        marks = self._pr(self.store.load(), pr.number).get("draft_events", [])
+        return (marks[-1][0], marks[-1][1]) if marks else None
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
         data = self.store.load()
@@ -164,7 +170,8 @@ class LocalCodeHost:
 
     def owner_review(self, pr: PrRef, actor: str, state: str, commit: str, text: str = "") -> None:
         data = self.store.load()
-        self._pr(data, pr.number)["reviews"].append(asdict(Review(actor, state, commit, text)))
+        reviews = self._pr(data, pr.number)["reviews"]
+        reviews.append(asdict(Review(actor, state, commit, text, str(len(reviews) + 1))))
         self.store.save(data)
 
     def owner_note(self, pr: PrRef, actor: str, text: str, commit: str | None) -> None:

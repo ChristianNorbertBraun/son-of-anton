@@ -36,19 +36,30 @@ class GitHub:
         self._token: str | None = None
         self._minted = 0.0
 
-    def _call(self, method: str, path: str, body: dict | None = None):
+    def _read_token(self) -> str:
         if self._token is None or self._clock() - self._minted > TOKEN_TTL:
             self._token = self._mint(self.app_id, self.key_path, self.repo.installation_id, self.repo.slug,
                                      dict(PERMISSIONS))
             self._minted = self._clock()
-        return self._api(method, f"/repos/{self.repo.slug}{path}", self._token, body)
+        return self._token
+
+    def _call(self, method: str, path: str, body: dict | None = None):
+        return self._api(method, f"/repos/{self.repo.slug}{path}", self._read_token(), body)
 
     def write(self, method: str, path: str, body: dict | None = None):
         return self._api(method, f"/repos/{self.repo.slug}{path}", self._write_token(), body)
 
     def graphql(self, query: str, variables: dict, permissions: dict[str, str] = PR_WRITE) -> dict:
-        """A 200 with `errors` is a failure: GraphQL reports nearly everything that way."""
-        res = self._api("POST", "/graphql", self._write_token(permissions), {"query": query, "variables": variables})
+        """A mutation, with a write token for this call. A 200 with `errors` is a failure: GraphQL reports nearly
+        everything that way."""
+        return self._graphql(self._write_token(permissions), query, variables)
+
+    def read_graphql(self, query: str, variables: dict) -> dict:
+        """A query, with the cached read token."""
+        return self._graphql(self._read_token(), query, variables)
+
+    def _graphql(self, token: str, query: str, variables: dict) -> dict:
+        res = self._api("POST", "/graphql", token, {"query": query, "variables": variables})
         if res.get("errors"):
             raise RuntimeError(f"GitHub GraphQL: {str(res['errors'])[:300]}")
         return res.get("data") or {}

@@ -6,7 +6,7 @@ the tracker recorded, and Policy says whether that actor counts."""
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Callable
 
 from .ports import PrState, Task
@@ -15,9 +15,9 @@ from .workflows import FLOW_BRANCH_PREFIX, WORKFLOWS
 TERMINAL = ("done", "cancelled")
 STATE_KINDS = ("queued", "running", "awaiting-gate", "blocked", "cancelling", "done", "cancelled")
 JOB_STAGES = ("plan", "revise", "implement", "rework", "review", "fix", "cleanup")
-EVENT_KINDS = ("start", "step_finished", "gate_passed", "gate_rejected", "approved", "stale_review", "pr_opened",
-               "pr_merged", "pr_closed", "issue_closed", "head_moved", "stall_detected", "retry", "cancel",
-               "effect_failed")
+EVENT_KINDS = ("start", "step_finished", "gate_passed", "gate_rejected", "approved", "stale_review", "draft_marked",
+               "gate_rearm", "pr_opened", "pr_merged", "pr_closed", "issue_closed", "head_moved", "stall_detected",
+               "retry", "cancel", "effect_failed")
 GATES = ("gate:plan", "gate:merge")
 MAX_REVISIONS = 3
 MAX_REWORKS = 3  # rounds of requested changes at the merge gate, then the owner
@@ -75,6 +75,9 @@ class Flow:
     # reviews a gate has answered, as review_key: each one is acted on or commented on once. None: a flow from before
     # this field, whose older reviews were answered by a version that did not record them
     noted: tuple[str, ...] | None = ()
+    # at the plan gate: the pull request was made a draft after the gate was entered, so a Ready from now on is new.
+    # False for a flow from before this field: it is armed again first
+    draft_checked: bool = False
 
     @property
     def branch(self) -> str:
@@ -103,7 +106,7 @@ class Event:
     gates: tuple[str, ...] = ()
     findings: tuple[dict, ...] = ()
     number: int = 0  # pr_opened
-    keys: tuple[str, ...] = ()  # gate events: the reviews they answer, as review_key
+    keys: tuple[str, ...] = ()  # gate events: the reviews they answer, as review_key; a review's own key first
 
 
 @dataclass(frozen=True)
@@ -155,8 +158,8 @@ def enter(flow: Flow, stage: str | None) -> tuple[Flow, list[Action]]:
         return _then(flow, stage, Action("mark_ready", pr_text(flow)))
     if stage == "gate:plan":
         # a plan PR is a draft: Ready for review is the owner's go, so one clicked before this plan was up is undone
-        return replace(flow, state="awaiting-gate:plan", stage=stage), [Action("mark_draft"),
-                                                                          report("awaiting-plan-review")]
+        return replace(flow, state="awaiting-gate:plan", stage=stage, draft_checked=False), [
+            Action("mark_draft"), report("awaiting-plan-review")]
     if stage == "gate:merge":
         return replace(flow, state="awaiting-gate:merge", stage=stage), [report("pr")]
     if stage is None:  # a workflow always ends in a gate; this is what a broken one gets
@@ -263,9 +266,13 @@ def on_step_finished(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
     if result == "ok":
         return on_ok(flow, event)
     if result == "no-change" and stage in ("fix", "cleanup"):
-        note = [Action("comment", {"text": "The fix step changed nothing."})] if stage == "fix" else []
+        remark = [Action("comment", {"text": "The fix step changed nothing."})] if stage == "fix" else []
         flow, actions = on_ok(flow, event)
-        return flow, [*note, *actions]
+        return flow, [*remark, *actions]
+    if result == "no-change" and stage == "rework":  # the owner's next review decides, not this one again
+        flow, actions = enter(replace(flow, retries=0), "gate:merge")
+        return flow, [Action("comment", {"text": "The rework changed nothing. Request changes again with more "
+                                                 "detail."}), *actions]
     if result == "error":
         return retry_or_block(flow, f"step {stage} failed: {event.text}" if event.text else f"step {stage} failed")
     if result == "unreadable":
@@ -283,8 +290,12 @@ def on_cancelling_finished(flow: Flow, event: Event, policy: Policy) -> tuple[Fl
     return cancelled(flow, flow.reason)
 
 
-def review_key(actor: str, commit: str, state: str) -> str:
-    return f"{actor.lower()}:{commit}:{state}"
+def review_key(actor: str, commit: str, state: str, review_id: str = "") -> str:
+    return f"{actor.lower()}:{commit}:{state}:{review_id}"
+
+
+def key_commit(key: str) -> str:
+    return key.rsplit(":", 3)[1]
 
 
 def note(flow: Flow, keys) -> Flow:
@@ -297,13 +308,14 @@ def review_marker(flow: Flow, key: str) -> str:
     return f"{flow.id}-review-{hashlib.sha256(key.encode()).hexdigest()[:16]}"
 
 
-def answered(flow: Flow, event: Event, policy: Policy, state: str) -> str | None:
-    """The review this gate event stands for, if it counts: a verified actor, the head the flow knows, a gate, and
-    not answered before. None otherwise."""
+def unanswered_key(flow: Flow, event: Event, policy: Policy, state: str) -> str | None:
+    """The key of the review this gate event stands for, if it counts: a verified actor, the head the flow knows, a
+    gate, and not answered before. None otherwise."""
     if not (flow.stage in GATES and policy.trusted(event.actor) and event.commit == flow.head):
         return None
-    key = review_key(event.actor or "", event.commit or "", state)
-    return None if key in (flow.noted or ()) else key
+    prefix = review_key(event.actor or "", event.commit or "", state)  # the review's own key comes first in keys
+    key = event.keys[0] if event.keys else prefix
+    return None if not key.startswith(prefix) or key in (flow.noted or ()) else key
 
 
 def on_gate_passed(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
@@ -315,7 +327,7 @@ def on_gate_passed(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list
 
 
 def on_gate_rejected(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
-    key = answered(flow, event, policy, "changes_requested")
+    key = unanswered_key(flow, event, policy, "changes_requested")
     if key is None:
         return flow, []
     if flow.stage == "gate:merge":
@@ -334,7 +346,7 @@ def on_gate_rejected(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, li
 def on_approved(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
     """Approve is no go at the plan gate any more, and at the merge gate it is a state the owner can see: the merge
     stays the owner's, and a later Request changes still starts a round."""
-    key = answered(flow, event, policy, "approved")
+    key = unanswered_key(flow, event, policy, "approved")
     if key is None:
         return flow, []
     flow = note(flow, (key, *event.keys))
@@ -352,10 +364,22 @@ def on_stale_review(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, lis
     keys = [k for k in event.keys if k not in flow.noted]
     if flow.stage not in GATES or not keys:
         return flow, []
-    actions = [Action("comment", {"text": f"The review on commit {k.rsplit(':', 2)[1][:12]} is on an older commit, so it "
+    actions = [Action("comment", {"text": f"The review on commit {key_commit(k)[:12]} is on an older commit, so it "
                                           "changes nothing. Review the current commit.",
                                   "marker": review_marker(flow, k)}) for k in keys]
     return note(flow, keys), actions
+
+
+def on_draft_marked(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
+    """The conductor made sure the pull request is a draft: from now on a Ready can pass the plan gate."""
+    return (replace(flow, draft_checked=True), []) if flow.stage == "gate:plan" else (flow, [])
+
+
+def on_gate_rearm(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
+    """A plan gate nobody made a draft for, like one entered by an older version: enter it again."""
+    if flow.stage != "gate:plan" or flow.draft_checked:
+        return flow, []
+    return enter(flow, "gate:plan")
 
 
 def on_head_moved(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
@@ -391,6 +415,8 @@ def on_retry(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Actio
     stage = flow.stage
     if adopted and stage == "implement" and "gate:plan" in WORKFLOWS[flow.workflow].stages:
         stage = "gate:plan"
+    if stage == "rework":  # its review is answered: the owner's next one says what to change now
+        stage = "gate:merge"
     flow = replace(flow, retries=0, revisions=0, reworks=0, restarts=0, reason="", foreign_head=False, stage=stage,
                    head=event.head if adopted else flow.head)
     fixes = repairs(flow)
@@ -405,7 +431,8 @@ Handler = Callable[[Flow, Event, Policy], "tuple[Flow, list[Action]]"]
 IGNORE: Handler = lambda flow, event, policy: (flow, [])
 _ends = {"pr_merged": on_merged, "pr_closed": on_pr_closed, "issue_closed": on_issue_closed, "cancel": on_cancel,
          "pr_opened": on_pr_opened, "effect_failed": on_effect_failed}
-_reviews = {"gate_passed": IGNORE, "gate_rejected": IGNORE, "approved": IGNORE, "stale_review": IGNORE}
+_reviews = {"gate_passed": IGNORE, "gate_rejected": IGNORE, "approved": IGNORE, "stale_review": IGNORE,
+            "draft_marked": IGNORE, "gate_rearm": IGNORE}
 TABLE: dict[str, dict[str, Handler]] = {
     "queued": {**_ends, **_reviews, "start": on_start, "step_finished": IGNORE, "head_moved": IGNORE,
                "stall_detected": IGNORE, "retry": IGNORE},
@@ -414,7 +441,8 @@ TABLE: dict[str, dict[str, Handler]] = {
                 "stall_detected": on_stall, "retry": IGNORE},
     "awaiting-gate": {**_ends, "start": IGNORE, "step_finished": IGNORE, "gate_passed": on_gate_passed,
                       "gate_rejected": on_gate_rejected, "approved": on_approved, "stale_review": on_stale_review,
-                      "head_moved": on_head_moved, "stall_detected": IGNORE, "retry": IGNORE},
+                      "draft_marked": on_draft_marked, "gate_rearm": on_gate_rearm, "head_moved": on_head_moved,
+                      "stall_detected": IGNORE, "retry": IGNORE},
     "blocked": {**_ends, **_reviews, "effect_failed": IGNORE, "start": IGNORE, "step_finished": IGNORE,
                 "head_moved": IGNORE, "stall_detected": IGNORE, "retry": on_retry},
     "cancelling": {**_reviews, "start": IGNORE, "step_finished": on_cancelling_finished, "pr_opened": on_pr_opened,
@@ -429,42 +457,45 @@ def step(flow: Flow, event: Event, policy: Policy) -> tuple[Flow, list[Action]]:
     return TABLE[flow.kind][event.kind](flow, event, policy)
 
 
-def ready_event(flow: Flow, pr: PrState, policy: Policy) -> Event | None:
-    """Ready for review passes the plan gate. Entering the gate made the pull request a draft, so a Ready counts
-    only if it is the newest of its ready and draft marks, by a verified actor, on the head the flow knows. The App's
-    own mark-ready is never one. The caller asks only once the flow's outbox is empty: that draft is done by then."""
-    if flow.stage != "gate:plan" or pr.draft or pr.head != flow.head or not pr.draft_events:
+def ready_event(flow: Flow, pr: PrState, mark: tuple[str, str] | None, policy: Policy) -> Event | None:
+    """Ready for review passes the plan gate. The pull request was made a draft after the gate was entered
+    (draft_checked), so a Ready counts only if it is the newest ready or draft mark, by a verified actor, on the head
+    the flow knows. The App's own mark-ready is never one."""
+    if not flow.draft_checked or flow.stage != "gate:plan" or pr.draft or pr.head != flow.head or mark is None:
         return None
-    kind, actor = pr.draft_events[-1]
+    kind, actor = mark
     if kind != "ready" or not policy.trusted(actor):
         return None
     return Event("gate_passed", actor=actor, commit=flow.head)
 
 
-def gate_events(flow: Flow, pr: PrState, policy: Policy) -> list[Event]:
+def gate_events(flow: Flow, pr: PrState, policy: Policy, mark: tuple[str, str] | None = None) -> list[Event]:
     """What the pull request means for the gate the flow waits at, in the order to apply them. A review counts only
     by a verified actor and for the head the flow knows, so an approval cannot pass a plan its author never saw, and
     each actor's last one counts. Requested changes win over a Ready and an approval. A review answered before (see
-    Flow.noted) does nothing again; one on an older commit gets one comment."""
+    Flow.noted) does nothing again; one on an older commit gets one comment. `mark`: see ready_event."""
     known = set(flow.noted or ())
-    counted = [r for r in pr.reviews if policy.trusted(r.actor) and r.state != "commented"]
-    on_head = tuple(dict.fromkeys(review_key(r.actor, r.commit, r.state) for r in counted if r.commit == flow.head))
-    older = tuple(dict.fromkeys(review_key(r.actor, r.commit, r.state) for r in counted if r.commit != flow.head))
-    events = [Event("stale_review", keys=tuple(k for k in older if k not in known))] if set(older) - known else []
+    keyed = [(review_key(r.actor, r.commit, r.state, r.id), r) for r in pr.reviews
+             if policy.trusted(r.actor) and r.state != "commented"]
+    on_head = tuple(dict.fromkeys(k for k, r in keyed if r.commit == flow.head))
+    stale = tuple(dict.fromkeys(k for k, r in keyed if r.commit != flow.head and k not in known))
+    events = [Event("stale_review", keys=stale)] if stale else []
     latest = {}
-    for review in counted:
+    for key, review in keyed:
         if review.commit == flow.head:
-            latest[review.actor.lower()] = review
-    fresh = [r for r in latest.values() if review_key(r.actor, r.commit, r.state) not in known]
-    rejected = [r for r in fresh if r.state == "changes_requested"]
+            latest[review.actor.lower()] = (key, review)
+    fresh = [(k, r) for k, r in latest.values() if k not in known]
+    rejected = [(k, r) for k, r in fresh if r.state == "changes_requested"]
     if rejected:
-        events.append(Event("gate_rejected", actor=rejected[0].actor, commit=flow.head, keys=on_head,
+        key, review = rejected[0]
+        events.append(Event("gate_rejected", actor=review.actor, commit=flow.head, keys=(key, *on_head),
                             text=feedback(flow, pr, policy) or "Changes were requested, without a comment."))
-    if ready := ready_event(flow, pr, policy):
+    if ready := ready_event(flow, pr, mark, policy):
         events.append(replace(ready, keys=on_head))
-    approved = [r for r in fresh if r.state == "approved"]
+    approved = [(k, r) for k, r in fresh if r.state == "approved"]
     if approved:
-        events.append(Event("approved", actor=approved[0].actor, commit=flow.head, keys=on_head))
+        key, review = approved[0]
+        events.append(Event("approved", actor=review.actor, commit=flow.head, keys=(key, *on_head)))
     return events
 
 
@@ -491,6 +522,9 @@ def to_dict(flow: Flow) -> dict:
 
 
 def from_dict(data: dict) -> Flow:
+    """Fields a later version added are left out: going back a version must not break the flows it wrote."""
+    names = {f.name for f in fields(Flow)}
+    data = {k: v for k, v in data.items() if k in names}
     noted = data.get("noted")
     return Flow(**{**data, "findings": tuple(data.get("findings") or ()), "gates": tuple(data.get("gates") or ()),
                    "noted": None if noted is None else tuple(noted)})

@@ -181,8 +181,12 @@ class Conductor:
             self.apply(flow, Event("effect_failed", text="the flow is at a gate without a pull request"))
         elif pr.head != flow.head:
             self.apply(flow, Event("head_moved", commit=pr.head))
+        elif flow.stage == "gate:plan" and not flow.draft_checked:
+            self.apply(flow, Event("gate_rearm"))  # no draft was made for this gate: a Ready on it would be old
         else:
-            for event in gate_events(flow, pr, self.policy(self.repo_of(flow))):
+            # the mark costs a call, and it counts only for a ready pull request at an armed plan gate
+            mark = host.last_draft_mark(PrRef(flow.pr)) if flow.stage == "gate:plan" and not pr.draft else None
+            for event in gate_events(flow, pr, self.policy(self.repo_of(flow)), mark):
                 if self.apply(flow, event) != flow:
                     return  # one step per look: what it started comes first, the rest is still there next time
 
@@ -321,10 +325,11 @@ class Conductor:
                 raise RuntimeError("no pull request to mark as a draft")
             # the comment first, under the action's marker: a replay after a crash still finds a ready PR and posts it
             # once, and one after the mark finds a draft and posts nothing
-            if not host.pr_state(ref).draft:
+            if not host.is_draft(ref):
                 host.comment(ref, self.outbound(flow, READY_AGAIN, "a comment"), action.marker)
             if host.mark_draft(ref):
                 self.log(f"flow {flow.id}: Ready came before this plan, the pull request is a draft again")
+            self.apply(flow, Event("draft_marked"))
         elif action.kind == "report":
             self.report(flow, tracker, action)
         elif action.kind == "comment":

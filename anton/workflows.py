@@ -24,7 +24,7 @@ FLOW_BRANCH_PREFIX = "anton/flow-"
 FLOW_BRANCH_RE = re.compile(r"anton/flow-[0-9a-f]{8}")  # the fence: only a flow pushes here. Older jobs had names like
 #                                                         anton/flow-chart-page-136ebb, and those stay theirs
 # labels only a flow sets. anton:running and anton:pr also belong to normal jobs, so they cannot mark one
-FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:blocked")
+FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:approved", "anton:blocked")
 
 
 def is_flow_issue(labels) -> bool:

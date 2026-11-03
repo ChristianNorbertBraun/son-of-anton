@@ -10,7 +10,8 @@ from unittest import mock
 
 from anton import bridge, gitops, poller, prs, runner, sandbox, steps, tripwire, workflows
 from anton.conductor import Refused
-from anton.flow import MAX_REWORKS, Action, Event, Policy, block, ready_event, step
+from anton.conductor import READY_AGAIN
+from anton.flow import MAX_REWORKS, Action, Event, Flow, Policy, block, ready_event, review_key, step
 from anton.ports import PrRef, PrState
 from anton.queue import LimitError
 from flow_rig import CLEAN, OWNER, FakeClaude, Rig, write
@@ -101,8 +102,8 @@ class GateInvariants(Rig):
         self.host.owner_ready(self.pr_ref(), "stranger")  # ready again, but not by the owner
         self.settle()
         self.assertEqual(self.flow().state, "awaiting-gate:plan")
-        pr = PrState(PrRef(flow.pr), flow.head, False, "open", False, (), (), (("ready", OWNER), ("draft", OWNER)))
-        self.assertIsNone(ready_event(flow, pr, self.conductor.policy(self.repo)))  # even if the flag says ready
+        pr = PrState(PrRef(flow.pr), flow.head, False, "open", False)
+        self.assertIsNone(ready_event(self.flow(), pr, ("draft", OWNER), self.conductor.policy(self.repo)))
 
     def test_ready_clicked_before_the_plan_gate_does_not_pass(self):
         flow = self.standard_to_plan_gate()
@@ -143,10 +144,73 @@ class GateInvariants(Rig):
         self.assertEqual(self.flow().state, "blocked")
         self.assertEqual(self.tracker.state_of("7"), "blocked")
 
+    def legacy(self, flow):
+        """The flow as 0.11 left it in flows.db: no draft check, no record of answered reviews."""
+        self.db.commit(flow, replace(flow, draft_checked=False, noted=None), [], Event("start"))
+
+    def test_a_ready_clicked_under_an_older_version_does_not_pass_its_plan_gate(self):
+        flow = self.standard_to_plan_gate()
+        self.host.owner_ready(self.pr_ref(), OWNER)  # under 0.11, which never made the PR a draft again
+        self.legacy(self.flow())
+        claude = self.settle(write("new.txt"))
+        self.assertEqual(claude.prompts, [])
+        self.assertEqual((self.flow().state, self.flow().draft_checked), ("awaiting-gate:plan", True))
+        self.assertTrue(self.pr().draft)
+        self.assertEqual(len([c for c in self.host.comments(self.pr_ref()) if READY_AGAIN[:40] in c]), 1)
+        self.host.owner_ready(self.pr_ref(), OWNER)
+        self.settle(write("new.txt"), CLEAN)
+        self.assertEqual(self.flow().state, "awaiting-gate:merge")
+        self.assertEqual(self.flow().head, self.host.head_of(flow.branch))
+
+    def test_a_flow_of_an_older_version_at_the_merge_gate_reworks_on_request(self):
+        flow = self.quick_to_merge_gate()
+        self.host.owner_review(self.pr_ref(), OWNER, "approved", "0" * 40)  # answered by the older version
+        self.legacy(flow)
+        self.host.owner_review(self.pr_ref(), OWNER, "changes_requested", flow.head, "Rename it")
+        claude = self.settle(write("renamed.txt"), CLEAN)
+        self.assertIn("Rename it", claude.prompts[0])
+        self.assertEqual((self.flow().state, self.flow().reworks), ("awaiting-gate:merge", 1))
+        self.assertFalse(any("older commit" in c for c in self.host.comments(self.pr_ref())))
+
     def test_the_core_checks_the_actor_even_if_a_caller_does_not(self):
         flow = self.standard_to_plan_gate()
         policy = Policy.of([OWNER], never=["merlin"], bot="anton[bot]")
         self.assertEqual(step(flow, Event("gate_passed", actor="stranger", commit=flow.head), policy)[0], flow)
+
+
+class CoreGateInvariants(unittest.TestCase):
+    """The core decides trust whatever the conductor hands it."""
+    POLICY = Policy.of([OWNER, "helper-bot[bot]", "anton[bot]", "merlin"], never=["merlin"], bot="anton[bot]")
+    HEAD = "a" * 40
+
+    def at(self, gate, **kw):
+        flow = Flow("abc", "example/repo", "7", "standard", "Do it", "main", "c" * 40, OWNER)
+        return replace(flow, state=f"awaiting-gate:{gate}", stage=f"gate:{gate}", head=self.HEAD, pr=3,
+                       draft_checked=True, **kw)
+
+    def test_at_the_merge_gate_a_review_by_anyone_untrusted_changes_nothing(self):
+        flow = self.at("merge")
+        for actor in (*GateInvariants.ACTORS, "Anton[Bot]", "", None):
+            for kind in ("gate_rejected", "approved"):
+                with self.subTest(actor=actor, kind=kind):
+                    self.assertEqual(step(flow, Event(kind, actor=actor, commit=self.HEAD, text="EVIL"), self.POLICY),
+                                     (flow, []))
+
+    def test_ready_by_a_chat_agent_a_bot_the_bot_login_in_another_case_or_nobody_does_not_count(self):
+        pr = PrState(PrRef(3), self.HEAD, False, "open", False)
+        for actor in ("merlin", "helper-bot[bot]", "anton[bot]", "Anton[Bot]", "ANTON[BOT]", "stranger", ""):
+            with self.subTest(actor=actor):
+                self.assertIsNone(ready_event(self.at("plan"), pr, ("ready", actor), self.POLICY))
+        self.assertIsNotNone(ready_event(self.at("plan"), pr, ("ready", OWNER), self.POLICY))
+
+    def test_a_review_key_that_is_not_the_actors_counts_for_nothing(self):
+        flow = self.at("merge")
+        for key in (review_key("stranger", self.HEAD, "changes_requested", "9"),
+                    review_key(OWNER, "b" * 40, "changes_requested", "9"),
+                    review_key(OWNER, self.HEAD, "approved", "9")):
+            with self.subTest(key=key):
+                event = Event("gate_rejected", actor=OWNER, commit=self.HEAD, text="x", keys=(key,))
+                self.assertEqual(step(flow, event, self.POLICY), (flow, []))
 
 
 class HeadInvariants(Rig):
@@ -229,12 +293,15 @@ class FenceInvariants(Rig):
         self.assertEqual(result.queued, [])
 
     def test_the_chat_bridge_leaves_flow_issues_alone(self):
-        gh, service = mock.Mock(), mock.Mock()
-        gh.issue.return_value = {"number": 7, "user": {"login": OWNER}, "labels": [{"name": "anton:blocked"}]}
-        b = bridge.Bridge(mock.Mock(repos={"example/repo": self.repo}), service, lambda repo: gh)
-        with self.assertRaises(ValueError):
-            b._queue_issue({"repo": "example/repo", "issue": 7}, "merlin")
-        service.submit.assert_not_called()
+        for label in workflows.FLOW_ONLY_LABELS:
+            with self.subTest(label=label):
+                gh, service = mock.Mock(), mock.Mock()
+                gh.issue.return_value = {"number": 7, "user": {"login": OWNER}, "labels": [{"name": label}]}
+                b = bridge.Bridge(mock.Mock(repos={"example/repo": self.repo}), service, lambda repo: gh)
+                with self.assertRaises(ValueError):
+                    b._queue_issue({"repo": "example/repo", "issue": 7}, "merlin")
+                service.submit.assert_not_called()
+        self.assertIn("anton:approved", workflows.FLOW_ONLY_LABELS)
 
     def test_a_label_of_the_repo_that_only_looks_like_a_flow_changes_nothing(self):
         self.assertFalse(workflows.is_flow_issue(["flow:ui", "anton"]))

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.adapters.local import LocalCodeHost, LocalTracker
-from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_pr_state
+from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_mark
 from anton.ports import AdapterError
 
 from .kit import Contract
@@ -74,12 +74,12 @@ class ClientTests(Base, unittest.TestCase):
         with self.assertRaisesRegex(AdapterError, "does not match"):
             client.call("list_ready")
 
-    def test_draft_events_that_are_no_pairs_are_an_error(self):
-        data = {"ref": {"number": 1}, "head": "a" * 40, "draft": False, "state": "open", "merged": False}
-        self.assertEqual(as_pr_state({**data, "draft_events": [["ready", "alice"]]}).draft_events, (("ready", "alice"),))
-        for bad in (["ready"], [["ready", "alice", "x"]], 5):
+    def test_a_draft_mark_that_is_no_pair_of_strings_is_an_error(self):
+        self.assertEqual(as_mark(["ready", "alice"]), ("ready", "alice"))
+        self.assertIsNone(as_mark(None))
+        for bad in (["ready"], ["ready", "alice", "x"], ["ready", None], "ready", 5, {}):
             with self.subTest(bad=bad), self.assertRaises(AdapterError):
-                as_pr_state({**data, "draft_events": bad})
+                as_mark(bad)
 
     def test_a_flood_is_cut_off(self):
         client = StdioClient([sys.executable, "-c",

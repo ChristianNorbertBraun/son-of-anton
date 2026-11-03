@@ -119,30 +119,34 @@ class Contract:
     def test_mark_draft_turns_a_ready_pull_request_back_and_can_be_repeated(self):
         pr, _ = self.opened()
         self.host.mark_ready(pr)
+        self.assertFalse(self.host.is_draft(pr))
         self.assertTrue(self.host.mark_draft(pr))
         self.assertFalse(self.host.mark_draft(pr))
         self.assertTrue(self.host.pr_state(pr).draft)
+        self.assertTrue(self.host.is_draft(pr))
 
     def test_mark_draft_of_a_draft_changes_nothing(self):
         pr, _ = self.opened()
         self.assertFalse(self.host.mark_draft(pr))
-        self.assertEqual(self.host.pr_state(pr).draft_events, ())
+        self.assertIsNone(self.host.last_draft_mark(pr))
 
-    def test_draft_events_carry_kind_and_actor_oldest_first(self):
+    def test_the_last_draft_mark_is_the_newest_with_its_actor(self):
         pr, _ = self.opened()
         self.owner.ready(pr, "alice")
+        self.assertEqual(self.host.last_draft_mark(pr), ("ready", "alice"))
         self.owner.draft(pr, "bob")
+        self.assertEqual(self.host.last_draft_mark(pr), ("draft", "bob"))
         self.owner.ready(pr, "alice")
-        state = self.host.pr_state(pr)
-        self.assertEqual(state.draft_events, (("ready", "alice"), ("draft", "bob"), ("ready", "alice")))
-        self.assertFalse(state.draft)
+        self.assertEqual(self.host.last_draft_mark(pr), ("ready", "alice"))
+        self.assertFalse(self.host.pr_state(pr).draft)
 
     def test_the_hosts_own_marks_are_recorded_as_its_own(self):
         pr, _ = self.opened()
         self.host.mark_ready(pr)
-        self.host.mark_ready(pr)  # no change, no event
+        self.assertEqual(self.host.last_draft_mark(pr), ("ready", self.owner.bot))
         self.host.mark_draft(pr)
-        self.assertEqual(self.host.pr_state(pr).draft_events, (("ready", self.owner.bot), ("draft", self.owner.bot)))
+        self.host.mark_draft(pr)  # no change, no mark
+        self.assertEqual(self.host.last_draft_mark(pr), ("draft", self.owner.bot))
 
     def test_reviews_carry_actor_state_and_commit(self):
         pr, sha = self.opened()
@@ -152,6 +156,8 @@ class Contract:
         self.assertEqual([(r.actor, r.state, r.commit) for r in reviews],
                          [("alice", "changes_requested", sha), ("bob", "approved", sha)])
         self.assertEqual(reviews[0].text, "Use sqlite")
+        self.assertTrue(reviews[0].id)
+        self.assertNotEqual(reviews[0].id, reviews[1].id)
 
     def test_notes_carry_actor_text_and_commit(self):
         pr, sha = self.opened()
@@ -181,5 +187,6 @@ class Contract:
     def test_an_unknown_pull_request_is_an_adapter_error(self):
         with self.assertRaises(AdapterError):
             self.host.pr_state(PrRef(404))
-        with self.assertRaises(AdapterError):
-            self.host.mark_draft(PrRef(404))
+        for method in (self.host.mark_draft, self.host.is_draft, self.host.last_draft_mark):
+            with self.subTest(method=method.__name__), self.assertRaises(AdapterError):
+                method(PrRef(404))

@@ -30,6 +30,7 @@ class Review:
     state: str  # approved | changes_requested | commented
     commit: str
     text: str = ""
+    id: str = ""  # the host's own id: two reviews alike in all else are still two
 
 
 @dataclass(frozen=True)
@@ -49,9 +50,6 @@ class PrState:
     merged: bool
     reviews: tuple[Review, ...] = ()
     notes: tuple[Note, ...] = ()
-    # ("ready" | "draft", actor) for each time it was marked ready for review or turned back into a draft, oldest
-    # first. An adapter that cannot see the newest one reports a last ("draft", "") instead: a gate fails closed
-    draft_events: tuple[tuple[str, str], ...] = ()
 
 
 class AdapterError(Exception):
@@ -78,6 +76,10 @@ class CodeHostAdapter(Protocol):
     def comment(self, pr: PrRef, text: str, marker: str) -> None: ...  # a marker that is there already: no-op
     def mark_ready(self, pr: PrRef) -> None: ...
     def mark_draft(self, pr: PrRef) -> bool: ...  # True if it was ready and is a draft now
+    def is_draft(self, pr: PrRef) -> bool: ...  # the flag alone, without reviews and comments
+    # the newest time it was marked ready for review or turned back into a draft: ("ready" | "draft", actor), or None.
+    # The actor as the host records it, a bot with its `[bot]` suffix; an account that is gone is ""
+    def last_draft_mark(self, pr: PrRef) -> tuple[str, str] | None: ...
     def close(self, pr: PrRef) -> None: ...
 
 

@@ -158,7 +158,7 @@ class OutcomeTableTests(unittest.TestCase):
         "ok": {"plan": "awaiting-gate:plan", "revise": "awaiting-gate:plan", "implement": "running:review",
                "rework": "running:review", "fix": "running:cleanup", "review": "running:cleanup",
                "cleanup": "awaiting-gate:merge"},
-        "no-change": {"plan": "blocked", "revise": "blocked", "implement": "blocked", "rework": "blocked",
+        "no-change": {"plan": "blocked", "revise": "blocked", "implement": "blocked", "rework": "awaiting-gate:merge",
                       "fix": "running:cleanup", "review": "blocked", "cleanup": "awaiting-gate:merge"},
     }
     BLOCKED = ("gates-failed", "protected", "hard-path", "secret", "unknown-head", "diff-too-large", "cancelled")
@@ -225,35 +225,48 @@ def event_kinds(events):
 
 class GateTests(unittest.TestCase):
     def gated(self, **kw):
-        return replace(new(), state="awaiting-gate:plan", stage="gate:plan", head=SHA, pr=3, **kw)
+        return replace(new(), **{"state": "awaiting-gate:plan", "stage": "gate:plan", "head": SHA, "pr": 3,
+                                 "draft_checked": True, **kw})
 
-    def pr(self, *reviews, notes=(), draft=True, marks=()):
-        return PrState(PrRef(3), SHA, draft, "open", False, tuple(reviews), tuple(notes), tuple(marks))
+    def pr(self, *reviews, notes=(), draft=True):
+        return PrState(PrRef(3), SHA, draft, "open", False, tuple(reviews), tuple(notes))
 
-    def ready(self, actor=OWNER, *before):
-        return self.pr(draft=False, marks=(*before, ("ready", actor)))
+    def ready(self):
+        return self.pr(draft=False)
 
     def test_ready_for_review_by_the_owner_passes(self):
-        events = gate_events(self.gated(), self.ready(), POLICY)
+        events = gate_events(self.gated(), self.ready(), POLICY, ("ready", OWNER))
         self.assertEqual(event_kinds(events), ["gate_passed"])
         flow, actions = step(self.gated(), events[0], POLICY)
         self.assertEqual(flow.state, "running:implement")
 
-    def test_ready_needs_the_newest_mark_a_ready_pull_request_and_the_head(self):
-        self.assertIsNone(ready_event(self.gated(), self.pr(draft=True, marks=(("ready", OWNER),)), POLICY))
-        self.assertIsNone(ready_event(self.gated(), self.pr(draft=False, marks=(("ready", OWNER), ("draft", OWNER))),
-                                      POLICY))
-        self.assertIsNone(ready_event(self.gated(), self.pr(draft=False), POLICY))
-        self.assertIsNone(ready_event(self.gated(), replace(self.ready(), head=OTHER), POLICY))
+    def test_ready_needs_the_newest_mark_a_ready_pull_request_the_head_and_an_armed_gate(self):
+        mark = ("ready", OWNER)
+        self.assertIsNone(ready_event(self.gated(), self.pr(draft=True), mark, POLICY))
+        self.assertIsNone(ready_event(self.gated(), self.ready(), ("draft", OWNER), POLICY))
+        self.assertIsNone(ready_event(self.gated(), self.ready(), None, POLICY))
+        self.assertIsNone(ready_event(self.gated(), replace(self.ready(), head=OTHER), mark, POLICY))
         self.assertIsNone(ready_event(replace(self.gated(), state="awaiting-gate:merge", stage="gate:merge"),
-                                      self.ready(), POLICY))
-        self.assertIsNotNone(ready_event(self.gated(), self.ready(OWNER, ("ready", "stranger"), ("draft", "anton[bot]")),
-                                         POLICY))
+                                      self.ready(), mark, POLICY))
+        self.assertIsNone(ready_event(self.gated(draft_checked=False), self.ready(), mark, POLICY))
+        self.assertIsNotNone(ready_event(self.gated(), self.ready(), mark, POLICY))
 
-    def test_entering_the_plan_gate_makes_the_pull_request_a_draft(self):
-        flow = running("revise", pr=3)
+    def test_entering_the_plan_gate_makes_the_pull_request_a_draft_before_ready_counts(self):
+        flow = running("revise", pr=3, draft_checked=True)
         flow, actions = step(flow, finished(flow, "ok", head=OTHER), POLICY)
-        self.assertEqual((flow.state, kinds(actions)), ("awaiting-gate:plan", ["mark_draft", "report"]))
+        self.assertEqual((flow.state, flow.draft_checked, kinds(actions)),
+                         ("awaiting-gate:plan", False, ["mark_draft", "report"]))
+        flow, actions = step(flow, Event("draft_marked"), POLICY)
+        self.assertEqual((flow.draft_checked, actions), (True, []))
+
+    def test_a_plan_gate_without_a_draft_is_armed_again(self):
+        flow, actions = step(self.gated(draft_checked=False), Event("gate_rearm"), POLICY)
+        self.assertEqual((flow.state, flow.draft_checked, kinds(actions)),
+                         ("awaiting-gate:plan", False, ["mark_draft", "report"]))
+        self.assertEqual(step(self.gated(), Event("gate_rearm"), POLICY), (self.gated(), []))
+        merge = replace(self.gated(draft_checked=False), state="awaiting-gate:merge", stage="gate:merge")
+        for kind in ("gate_rearm", "draft_marked"):
+            self.assertEqual(step(merge, Event(kind), POLICY), (merge, []))
 
     def test_an_approval_no_longer_passes_and_gets_one_comment(self):
         events = gate_events(self.gated(), self.pr(Review(OWNER, "approved", SHA)), POLICY)
@@ -281,7 +294,7 @@ class GateTests(unittest.TestCase):
     def test_changes_requested_by_anyone_trusted_beats_an_approval_and_a_ready(self):
         policy = Policy.of([OWNER, "second"])
         pr = replace(self.ready(), reviews=(Review(OWNER, "approved", SHA), Review("second", "changes_requested", SHA, "No")))
-        events = gate_events(self.gated(), pr, policy)
+        events = gate_events(self.gated(), pr, policy, ("ready", OWNER))
         self.assertEqual(event_kinds(events), ["gate_rejected", "gate_passed", "approved"])
         flow, _ = step(self.gated(), events[0], policy)
         self.assertEqual(flow.state, "running:revise")
@@ -333,6 +346,7 @@ class GateTests(unittest.TestCase):
         events = gate_events(self.gated(), pr, POLICY)
         self.assertEqual(event_kinds(events), ["stale_review"])
         self.assertEqual(events[0].keys, (review_key(OWNER, OTHER, "approved"),))
+        self.assertEqual(F.key_commit(events[0].keys[0]), OTHER)
         flow, actions = step(self.gated(), events[0], POLICY)
         self.assertEqual((flow.state, kinds(actions)), ("awaiting-gate:plan", ["comment"]))
         self.assertIn(OTHER[:12], actions[0].payload["text"])
@@ -345,6 +359,13 @@ class GateTests(unittest.TestCase):
         self.assertEqual((actions, flow.noted), ([], (review_key(OWNER, OTHER, "changes_requested"),)))
         self.assertEqual(F.from_dict({k: v for k, v in F.to_dict(self.gated()).items() if k != "noted"}).noted, None)
         self.assertEqual(F.from_dict(F.to_dict(self.gated())).noted, ())
+
+    def test_a_flow_from_before_the_draft_check_is_not_armed(self):
+        legacy = {k: v for k, v in F.to_dict(self.gated()).items() if k != "draft_checked"}
+        self.assertFalse(F.from_dict(legacy).draft_checked)
+
+    def test_fields_of_a_later_version_are_left_out(self):
+        self.assertEqual(F.from_dict({**F.to_dict(self.gated()), "added_in_a_later_version": 1}), self.gated())
 
 
 class MergeGateTests(unittest.TestCase):
@@ -401,8 +422,7 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(step(flow, event, POLICY)[0].state, "running:rework")
 
     def test_ready_means_nothing_at_the_merge_gate(self):
-        pr = replace(self.pr(), draft_events=(("ready", OWNER),))
-        self.assertEqual(gate_events(self.gated(), pr, POLICY), [])
+        self.assertEqual(gate_events(self.gated(), self.pr(), POLICY, ("ready", OWNER)), [])
         self.assertEqual(step(self.gated(), Event("gate_passed", actor=OWNER, commit=SHA), POLICY)[0], self.gated())
 
     def test_three_reworks_then_blocked_and_a_retry_takes_the_review_up(self):
@@ -420,13 +440,33 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(step(flow, Event("gate_rejected", actor=OWNER, commit=flow.head, text="x"), POLICY)[0].state,
                          "running:rework")
 
-    def test_a_retried_rework_brings_the_same_review(self):
+    def test_an_automatic_retry_of_a_rework_brings_the_same_review(self):
         flow = step(self.gated(), Event("gate_rejected", actor=OWNER, commit=SHA, text="Rename it"), POLICY)[0]
-        flow, _ = step(flow, finished(flow, "error"), POLICY)
-        flow, _ = step(flow, finished(flow, "error"), POLICY)
-        self.assertEqual(flow.state, "blocked")
-        flow, actions = step(flow, Event("retry"), POLICY)
+        flow, actions = step(flow, finished(flow, "error"), POLICY)
         self.assertEqual((flow.state, actions[-1].payload["spec"]["feedback"]), ("running:rework", "Rename it"))
+
+    def test_the_owners_retry_of_a_blocked_rework_waits_for_the_next_review(self):
+        rejected = Event("gate_rejected", actor=OWNER, commit=SHA, text="Rename it")
+        flow = step(self.gated(), rejected, POLICY)[0]
+        flow, _ = step(flow, finished(flow, "gates-failed"), POLICY)
+        self.assertEqual((flow.state, flow.stage), ("blocked", "rework"))
+        flow, actions = step(flow, Event("retry"), POLICY)
+        self.assertEqual((flow.state, submitted(actions)), ("awaiting-gate:merge", []))
+        self.assertEqual(step(flow, rejected, POLICY), (flow, []))  # the old review stays answered
+        old = Review(OWNER, "changes_requested", SHA, "Rename it", "1")
+        flow = replace(flow, noted=(review_key(OWNER, SHA, "changes_requested", "1"),))
+        self.assertEqual(gate_events(flow, PrState(PrRef(3), SHA, False, "open", False, (old,)), POLICY), [])
+        newer = Review(OWNER, "changes_requested", SHA, "Rename it, and the test", "2")
+        event, = gate_events(flow, PrState(PrRef(3), SHA, False, "open", False, (old, newer)), POLICY)
+        flow, actions = step(flow, event, POLICY)
+        self.assertEqual(flow.state, "running:rework")
+        self.assertIn("and the test", actions[-1].payload["spec"]["feedback"])
+
+    def test_a_rework_that_changes_nothing_goes_back_to_the_gate_with_a_comment(self):
+        flow = step(self.gated(), Event("gate_rejected", actor=OWNER, commit=SHA, text="x"), POLICY)[0]
+        flow, actions = step(flow, finished(flow, "no-change", head=SHA), POLICY)
+        self.assertEqual((flow.state, flow.head, kinds(actions)), ("awaiting-gate:merge", SHA, ["comment", "report"]))
+        self.assertIn("changed nothing", actions[0].payload["text"])
 
     def test_a_rework_without_a_pull_request_opens_it_on_retry(self):
         flow = replace(running("rework", "quick"), state="blocked", pr=None)

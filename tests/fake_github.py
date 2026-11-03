@@ -128,6 +128,8 @@ class FakeGitHub:
     def graphql(self, body, token):
         if self.fail_graphql:
             return {"data": None, "errors": [{"message": self.fail_graphql}]}
+        if body["query"].startswith("query"):
+            return self.last_draft_mark(body["variables"], token)
         draft = "convertPullRequestToDraft" in body["query"]
         # what the real one does: converting needs contents write as well, marking ready does not
         if draft and self.permissions_of(token).get("contents") != "write":
@@ -137,6 +139,25 @@ class FakeGitHub:
                 self.set_draft(number, draft, self.bot)
         name = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
         return {"data": {name: {"pullRequest": {"isDraft": draft}}}}
+
+    def last_draft_mark(self, variables, token):
+        """Like the real one: a bot's login without `[bot]`, a deleted account as no actor, no node without a mark."""
+        assert self.permissions_of(token).get("pull_requests") in ("read", "write")
+        assert f"{variables['o']}/{variables['n']}" == self.slug
+        if variables["pr"] not in self.pulls:
+            return {"data": {"repository": {"pullRequest": None}}}
+        names = {"ready_for_review": "ReadyForReviewEvent", "convert_to_draft": "ConvertToDraftEvent"}
+        marks = [e for e in self.issues[variables["pr"]].get("_events", []) if e["event"] in names]
+        nodes = []
+        if marks:
+            login = (marks[-1].get("actor") or {}).get("login")
+            actor = None if login is None else (
+                {"__typename": "Bot", "login": login.removesuffix("[bot]")} if login.endswith("[bot]")
+                else {"__typename": "User", "login": login})
+            nodes = [{"__typename": names[marks[-1]["event"]], "actor": actor}]
+        pull = self.pulls[variables["pr"]]
+        return {"data": {"repository": {"pullRequest": {"isDraft": pull["draft"], "timelineItems": {
+            "totalCount": len(self.issues[variables["pr"]].get("_events", [])), "nodes": nodes}}}}}
 
     def set_draft(self, number, draft, actor):
         pull = self.pulls[number]
@@ -184,8 +205,9 @@ class FakeGitHub:
         return sha
 
     def add_review(self, pr, actor, state, commit, text=""):
-        self.pulls[pr.number]["_reviews"].append({"user": {"login": actor}, "state": state.upper(), "commit_id": commit,
-                                                  "body": text})
+        reviews = self.pulls[pr.number]["_reviews"]
+        reviews.append({"id": 1000 + len(reviews), "user": {"login": actor}, "state": state.upper(),
+                        "commit_id": commit, "body": text})
 
     def mark_ready_by(self, pr, actor):
         self.set_draft(pr.number, False, actor)
