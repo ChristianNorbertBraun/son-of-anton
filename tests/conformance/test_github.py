@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from anton.adapters.github import GitHubCodeHost, GitHubTracker
-from anton.github import PERMISSIONS, GitHub
+from anton.github import PERMISSIONS, PR_DRAFT, PR_WRITE, GitHub
 from anton.ports import PrRef, marked
 from fake_github import FakeGitHub
 
@@ -23,7 +23,7 @@ class GitHubConformance(Contract, unittest.TestCase):
         return tracker, host, SimpleNamespace(
             add=fake.add_issue, close=fake.close_issue, push=fake.push, review=fake.add_review, note=fake.add_note,
             merge=fake.merge, comments=fake.comments_of, task_comments=fake.task_comments, task_state=fake.task_state,
-            pr_text=fake.pr_text)
+            pr_text=fake.pr_text, ready=fake.mark_ready_by, draft=fake.mark_draft_by, bot=fake.bot)
 
 
 class GitHubSpecificTests(unittest.TestCase):
@@ -137,6 +137,50 @@ class GitHubSpecificTests(unittest.TestCase):
         self.assertEqual(PERMISSIONS["pull_requests"], "read")
         self.opened()
         self.assertTrue(any(t.get("pull_requests") == "write" for t in self.fake.tokens))
+
+    def test_mark_draft_mints_its_own_token_with_contents_write_and_nothing_else_does(self):
+        pr = self.opened()
+        self.host.mark_ready(pr)
+        self.host.update_pr(pr, "T", "B")
+        before = len(self.fake.tokens)
+        self.assertTrue(self.host.mark_draft(pr))
+        self.assertEqual(self.fake.tokens[before:], [PR_DRAFT])
+        self.assertEqual(PR_DRAFT, {"pull_requests": "write", "contents": "write"})
+        self.host.mark_ready(pr)
+        self.host.comment(pr, "a", "m1")
+        self.host.close(pr)
+        writes = [self.fake.permissions_of(token) for method, path, token in self.fake.calls
+                  if method != "GET" and "/labels" not in path]
+        self.assertEqual(writes.count(PR_DRAFT), 1)
+        self.assertTrue(all(w == PR_WRITE for w in writes if w != PR_DRAFT))
+        self.assertEqual(PR_WRITE, {"pull_requests": "write"})
+
+    def test_mark_draft_with_the_ordinary_write_token_is_refused_like_on_github(self):
+        pr = self.opened()
+        self.host.mark_ready(pr)
+        with self.assertRaisesRegex(RuntimeError, "not accessible"):
+            self.host.gh.graphql("mutation { convertPullRequestToDraft }", {"id": f"PR_{pr.number}"})
+        self.assertFalse(self.host.pr_state(pr).draft)
+
+    def test_mark_draft_of_a_draft_makes_no_call(self):
+        pr = self.opened()
+        calls = len(self.fake.calls)
+        self.assertFalse(self.host.mark_draft(pr))
+        self.assertFalse(any(path == "/graphql" for _, path, _ in self.fake.calls[calls:]))
+
+    def test_draft_events_come_from_the_issue_events_with_their_actor(self):
+        pr = self.opened()
+        self.fake.issues[pr.number]["_events"] = [
+            {"event": "labeled", "actor": {"login": "owner"}},
+            {"event": "ready_for_review", "actor": {"login": "owner"}},
+            {"event": "convert_to_draft", "actor": None},
+            {"event": "review_requested", "actor": {"login": "owner"}}]
+        self.assertEqual(self.host.pr_state(pr).draft_events, (("ready", "owner"), ("draft", "")))
+
+    def test_at_the_event_cap_the_last_word_is_a_draft_by_nobody(self):
+        pr = self.opened()
+        self.fake.issues[pr.number]["_events"] = [{"event": "ready_for_review", "actor": {"login": "owner"}}] * 500
+        self.assertEqual(self.host.pr_state(pr).draft_events[-1], ("draft", ""))
 
     def test_a_server_error_is_not_read_as_not_found(self):
         self.fake.api = mock.Mock(side_effect=RuntimeError("GitHub API GET /x: 500 b'boom'"))

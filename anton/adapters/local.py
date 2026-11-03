@@ -85,8 +85,9 @@ class LocalTracker:
 
 
 class LocalCodeHost:
-    def __init__(self, root: Path, bare: Path):
-        self.store, self.bare = Store(Path(root) / "prs.json"), Path(bare)
+    def __init__(self, root: Path, bare: Path, actor: str = "anton[bot]"):
+        # actor: whom the host records for what the conductor does, as GitHub records the App
+        self.store, self.bare, self.actor = Store(Path(root) / "prs.json"), Path(bare), actor
 
     def _pr(self, data: dict, number: int) -> dict:
         if str(number) not in data:
@@ -116,7 +117,7 @@ class LocalCodeHost:
         url = f"https://example.com/pull/{number}"
         data[str(number)] = {"number": number, "url": url, "branch": branch, "base": base, "title": title, "body": body,
                              "draft": True, "state": "open", "merged": False, "reviews": [], "notes": [],
-                             "comments": []}
+                             "comments": [], "draft_events": []}
         self.store.save(data)
         return PrRef(number, url)
 
@@ -129,7 +130,8 @@ class LocalCodeHost:
         p = self._pr(self.store.load(), pr.number)
         head = p.get("merged_head") or self.head_of(p["branch"]) or ""
         return PrState(PrRef(p["number"], p["url"]), head, p["draft"], p["state"], p["merged"],
-                       tuple(Review(**r) for r in p["reviews"]), tuple(Note(**n) for n in p["notes"]))
+                       tuple(Review(**r) for r in p["reviews"]), tuple(Note(**n) for n in p["notes"]),
+                       tuple((kind, actor) for kind, actor in p.get("draft_events", [])))
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
         data = self.store.load()
@@ -139,9 +141,21 @@ class LocalCodeHost:
             self.store.save(data)
 
     def mark_ready(self, pr: PrRef) -> None:
+        self._set_draft(pr, False, self.actor)
+
+    def mark_draft(self, pr: PrRef) -> bool:
+        return self._set_draft(pr, True, self.actor)
+
+    def _set_draft(self, pr: PrRef, draft: bool, actor: str) -> bool:
+        """Like GitHub: a change records who made it, and no change records nothing."""
         data = self.store.load()
-        self._pr(data, pr.number)["draft"] = False
+        p = self._pr(data, pr.number)
+        if p["draft"] == draft:
+            return False
+        p["draft"] = draft
+        p.setdefault("draft_events", []).append(["draft" if draft else "ready", actor])
         self.store.save(data)
+        return True
 
     def close(self, pr: PrRef) -> None:
         data = self.store.load()
@@ -157,6 +171,12 @@ class LocalCodeHost:
         data = self.store.load()
         self._pr(data, pr.number)["notes"].append(asdict(Note(actor, text, commit)))
         self.store.save(data)
+
+    def owner_ready(self, pr: PrRef, actor: str) -> None:
+        self._set_draft(pr, False, actor)
+
+    def owner_draft(self, pr: PrRef, actor: str) -> None:
+        self._set_draft(pr, True, actor)
 
     def owner_comment(self, pr: PrRef, text: str) -> None:
         data = self.store.load()

@@ -50,7 +50,8 @@ class LocalConformance(Contract, unittest.TestCase):
         owner = SimpleNamespace(add=tracker.owner_add, close=tracker.owner_close, push=pusher(bare),
                                 review=host.owner_review, note=host.owner_note, merge=host.owner_merge,
                                 comments=host.comments, task_comments=tracker.comments, task_state=tracker.state_of,
-                                pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]))
+                                pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]),
+                                ready=host.owner_ready, draft=host.owner_draft, bot=host.actor)
         return tracker, host, owner
 
 

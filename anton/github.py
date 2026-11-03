@@ -15,6 +15,9 @@ TOKEN_TTL = 45 * 60
 PERMISSIONS = {"issues": "write", "pull_requests": "read", "contents": "read"}
 # changing a pull request: a separate token, minted for each call and never cached
 PR_WRITE = {"pull_requests": "write"}
+# turning a pull request back into a draft: GitHub refuses convertPullRequestToDraft without contents write
+# ("Resource not accessible by integration", verified 2026-11-03), so this one mutation gets its own token
+PR_DRAFT = {"pull_requests": "write", "contents": "write"}
 EVENT_PAGES = 5
 STATES = ("queued", "running", "pr", "patch", "failed")
 COLORS = {"": "5319e7", "queued": "fbca04", "running": "0e8a16", "pr": "1d76db", "patch": "c5def5", "failed": "d93f0b"}
@@ -43,15 +46,15 @@ class GitHub:
     def write(self, method: str, path: str, body: dict | None = None):
         return self._api(method, f"/repos/{self.repo.slug}{path}", self._write_token(), body)
 
-    def graphql(self, query: str, variables: dict) -> dict:
+    def graphql(self, query: str, variables: dict, permissions: dict[str, str] = PR_WRITE) -> dict:
         """A 200 with `errors` is a failure: GraphQL reports nearly everything that way."""
-        res = self._api("POST", "/graphql", self._write_token(), {"query": query, "variables": variables})
+        res = self._api("POST", "/graphql", self._write_token(permissions), {"query": query, "variables": variables})
         if res.get("errors"):
             raise RuntimeError(f"GitHub GraphQL: {str(res['errors'])[:300]}")
         return res.get("data") or {}
 
-    def _write_token(self) -> str:
-        return self._mint(self.app_id, self.key_path, self.repo.installation_id, self.repo.slug, dict(PR_WRITE))
+    def _write_token(self, permissions: dict[str, str] = PR_WRITE) -> str:
+        return self._mint(self.app_id, self.key_path, self.repo.installation_id, self.repo.slug, dict(permissions))
 
     def _pages(self, path: str, pages: int = 5) -> list[dict]:
         out: list[dict] = []

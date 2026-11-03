@@ -2,7 +2,7 @@
 in the core. Labels and comments use the issues token; changes to a pull request a write token minted per call."""
 from __future__ import annotations
 
-from ..github import EVENT_PAGES, GitHub
+from ..github import EVENT_PAGES, PR_DRAFT, GitHub
 from ..poller import last_labeler
 from ..ports import AdapterError, Note, PrRef, PrState, Review, Task, has_marker, marked
 from ..workflows import LABEL_PREFIX, WORKFLOWS, flow_label
@@ -10,10 +10,13 @@ from ..workflows import LABEL_PREFIX, WORKFLOWS, flow_label
 STATE_PREFIX = "anton:"
 STATE_COLOR = "1d76db"
 FLOW_COLOR = "5319e7"
-FLOW_STATES = ("queued", "running", "awaiting-plan-review", "pr", "blocked", "done", "cancelled")
+FLOW_STATES = ("queued", "running", "awaiting-plan-review", "pr", "approved", "blocked", "done", "cancelled")
 REVIEW_STATES = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes_requested", "COMMENTED": "commented"}
 MARK_READY = ("mutation ($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
               "{ pullRequest { isDraft } } }")
+MARK_DRAFT = ("mutation ($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) "
+              "{ pullRequest { isDraft } } }")
+DRAFT_EVENTS = {"ready_for_review": "ready", "convert_to_draft": "draft"}
 
 
 def not_found(error: Exception) -> bool:
@@ -141,7 +144,16 @@ class GitHubCodeHost:
         notes = tuple(Note(login(c), c.get("body") or "", c.get("original_commit_id") or c.get("commit_id"))
                       for c in self.gh.review_comments(pr.number) if login(c))
         return PrState(PrRef(p["number"], p.get("html_url") or ""), (p.get("head") or {}).get("sha") or "",
-                       bool(p.get("draft")), p.get("state") or "open", bool(p.get("merged")), reviews, notes)
+                       bool(p.get("draft")), p.get("state") or "open", bool(p.get("merged")), reviews, notes,
+                       self._draft_events(pr.number))
+
+    def _draft_events(self, number: int) -> tuple[tuple[str, str], ...]:
+        """In the order GitHub recorded them. At the cap the newest are missing, and the newest is the one that
+        counts: then the last word is a draft by nobody."""
+        events = self.gh.events(number)
+        marks = tuple((DRAFT_EVENTS[e["event"]], (e.get("actor") or {}).get("login") or "")
+                      for e in events if e.get("event") in DRAFT_EVENTS)
+        return (*marks, ("draft", "")) if len(events) >= EVENT_PAGES * 100 else marks
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
         if not written_by(self.gh.issue_comments(pr.number), self.bot, marker):
@@ -151,6 +163,13 @@ class GitHubCodeHost:
         p = self._pull(pr.number)
         if p.get("draft"):  # REST ignores `draft: false`, so this is the one way
             self.gh.graphql(MARK_READY, {"id": p["node_id"]})
+
+    def mark_draft(self, pr: PrRef) -> bool:
+        p = self._pull(pr.number)
+        if p.get("draft"):
+            return False
+        self.gh.graphql(MARK_DRAFT, {"id": p["node_id"]}, PR_DRAFT)
+        return True
 
     def close(self, pr: PrRef) -> None:
         self.gh.write("PATCH", f"/pulls/{int(pr.number)}", {"state": "closed"})

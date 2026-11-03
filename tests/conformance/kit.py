@@ -3,7 +3,8 @@
 A subclass mixes this into unittest.TestCase and implements `make()`, which returns (tracker, host, owner). `owner`
 plays the people on the other side: add(key, ...), close(key, actor), push(branch) -> sha, review(pr, actor, state,
 commit, text), note(pr, actor, text, commit), merge(pr), comments(pr), task_comments(key), task_state(key),
-pr_text(pr) -> (title, body)."""
+pr_text(pr) -> (title, body), ready(pr, actor) and draft(pr, actor) (the buttons), and `bot`, the actor the host
+records for what the adapter itself does."""
 from anton.ports import AdapterError, PrRef
 
 
@@ -115,6 +116,34 @@ class Contract:
         self.host.mark_ready(pr)
         self.assertFalse(self.host.pr_state(pr).draft)
 
+    def test_mark_draft_turns_a_ready_pull_request_back_and_can_be_repeated(self):
+        pr, _ = self.opened()
+        self.host.mark_ready(pr)
+        self.assertTrue(self.host.mark_draft(pr))
+        self.assertFalse(self.host.mark_draft(pr))
+        self.assertTrue(self.host.pr_state(pr).draft)
+
+    def test_mark_draft_of_a_draft_changes_nothing(self):
+        pr, _ = self.opened()
+        self.assertFalse(self.host.mark_draft(pr))
+        self.assertEqual(self.host.pr_state(pr).draft_events, ())
+
+    def test_draft_events_carry_kind_and_actor_oldest_first(self):
+        pr, _ = self.opened()
+        self.owner.ready(pr, "alice")
+        self.owner.draft(pr, "bob")
+        self.owner.ready(pr, "alice")
+        state = self.host.pr_state(pr)
+        self.assertEqual(state.draft_events, (("ready", "alice"), ("draft", "bob"), ("ready", "alice")))
+        self.assertFalse(state.draft)
+
+    def test_the_hosts_own_marks_are_recorded_as_its_own(self):
+        pr, _ = self.opened()
+        self.host.mark_ready(pr)
+        self.host.mark_ready(pr)  # no change, no event
+        self.host.mark_draft(pr)
+        self.assertEqual(self.host.pr_state(pr).draft_events, (("ready", self.owner.bot), ("draft", self.owner.bot)))
+
     def test_reviews_carry_actor_state_and_commit(self):
         pr, sha = self.opened()
         self.owner.review(pr, "alice", "changes_requested", sha, "Use sqlite")
@@ -152,3 +181,5 @@ class Contract:
     def test_an_unknown_pull_request_is_an_adapter_error(self):
         with self.assertRaises(AdapterError):
             self.host.pr_state(PrRef(404))
+        with self.assertRaises(AdapterError):
+            self.host.mark_draft(PrRef(404))

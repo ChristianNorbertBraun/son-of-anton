@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.adapters.local import LocalCodeHost, LocalTracker
-from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker
+from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_pr_state
 from anton.ports import AdapterError
 
 from .kit import Contract
@@ -34,7 +34,8 @@ class StdioConformance(Contract, Base, unittest.TestCase):
         return StdioTracker(client), StdioCodeHost(client), SimpleNamespace(
             add=tracker.owner_add, close=tracker.owner_close, push=pusher(self.bare), review=host.owner_review,
             note=host.owner_note, merge=host.owner_merge, comments=host.comments, task_comments=tracker.comments,
-            task_state=tracker.state_of, pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]))
+            task_state=tracker.state_of, pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]),
+            ready=host.owner_ready, draft=host.owner_draft, bot=host.actor)
 
 
 class ClientTests(Base, unittest.TestCase):
@@ -72,6 +73,13 @@ class ClientTests(Base, unittest.TestCase):
         self.addCleanup(client.stop)
         with self.assertRaisesRegex(AdapterError, "does not match"):
             client.call("list_ready")
+
+    def test_draft_events_that_are_no_pairs_are_an_error(self):
+        data = {"ref": {"number": 1}, "head": "a" * 40, "draft": False, "state": "open", "merged": False}
+        self.assertEqual(as_pr_state({**data, "draft_events": [["ready", "alice"]]}).draft_events, (("ready", "alice"),))
+        for bad in (["ready"], [["ready", "alice", "x"]], 5):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                as_pr_state({**data, "draft_events": bad})
 
     def test_a_flood_is_cut_off(self):
         client = StdioClient([sys.executable, "-c",

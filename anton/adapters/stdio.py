@@ -4,7 +4,8 @@
     {"id": 1, "result": {"key": "7", "title": "...", ...}}
     {"id": 2, "error": {"kind": "adapter", "message": "no task 7"}}
 
-The methods are those of ports.TrackerAdapter and ports.CodeHostAdapter, with dataclasses as objects. An adapter runs
+The methods are those of ports.TrackerAdapter and ports.CodeHostAdapter, with dataclasses as objects and tuples as
+lists: `pr_state` answers with `draft_events` as [[kind, actor], ...], `mark_draft` with true or false. An adapter runs
 outside the sandbox and holds its tracker's token: it is trusted code, and nothing installs one by itself. A program
 that dies is started again for the next request. Requests are not repeated by this layer: the outbox does that, and
 the methods are idempotent."""
@@ -92,8 +93,14 @@ def as_task(data: dict) -> Task:
 
 
 def as_pr_state(data: dict) -> PrState:
+    """`draft_events` is a list of [kind, actor] pairs, oldest first; one that is no pair is an error."""
+    try:
+        marks = tuple((str(kind), str(actor)) for kind, actor in data.get("draft_events") or ())
+    except (TypeError, ValueError):
+        raise AdapterError("the adapter's draft_events are no [kind, actor] pairs") from None
     return PrState(PrRef(**data["ref"]), data["head"], data["draft"], data["state"], data["merged"],
-                   tuple(Review(**r) for r in data.get("reviews") or ()), tuple(Note(**n) for n in data.get("notes") or ()))
+                   tuple(Review(**r) for r in data.get("reviews") or ()), tuple(Note(**n) for n in data.get("notes") or ()),
+                   marks)
 
 
 class StdioTracker:
@@ -144,6 +151,9 @@ class StdioCodeHost:
 
     def mark_ready(self, pr: PrRef) -> None:
         self.client.call("mark_ready", pr=asdict(pr))
+
+    def mark_draft(self, pr: PrRef) -> bool:
+        return self.client.call("mark_draft", pr=asdict(pr)) is True
 
     def close(self, pr: PrRef) -> None:
         self.client.call("close", pr=asdict(pr))
