@@ -38,6 +38,14 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(part, text)
         self.assertNotIn("The body", text)
 
+    def test_a_rework_round_shows_where_implement_was(self):
+        pips = dashboard.pip_states(flow(state="running:rework", stage="rework", reworks=2))
+        self.assertEqual(pips[:3], [("plan", "done"), ("plan gate", "done"), ("rework 2/3", "now")])
+        self.assertEqual(pips[-1], ("merge gate", "todo"))
+        after = dashboard.pip_states(flow(state="awaiting-gate:merge", stage="gate:merge", reworks=1))
+        self.assertIn(("rework 1/3", "done"), after)
+        self.assertIn(("implement", "done"), dashboard.pip_states(flow(state="awaiting-gate:merge", stage="gate:merge")))
+
     def test_all_tracker_text_is_escaped(self):
         evil = '<script>alert(1)</script>"\'><img src=x>'
         text = self.body(flow(brief=evil, reason=evil, key="7<b>", state="blocked", stage="implement"))

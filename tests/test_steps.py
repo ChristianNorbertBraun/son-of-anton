@@ -763,6 +763,24 @@ class FixAndCleanupTests(Base):
         self.assertEqual(len(claude.prompts), 1)
         self.assertEqual(self.remote_head(), head)
 
+    def test_rework_adds_a_gated_commit_and_marks_the_review_as_data(self):
+        head = self.implemented()
+        def broken(work):
+            write("new.txt", "renamed\n")(work)
+            write("broken")(work)
+        claude = FakeClaude(broken, lambda work: (work / "broken").unlink())
+        _, step, _ = self.run_step(self.spec("rework", expected_head=head, feedback="Rename it"), claude)
+        self.assertEqual(step.output["outcome"], "ok")
+        self.assertEqual(sh(["rev-parse", f"{step.output['head']}~1"], self.bare), head)
+        self.assertIn("DATA (the owner's review of the change)", claude.prompts[0])
+        self.assertIn("Rename it", claude.prompts[0])
+        self.assertIn("Rename it", claude.prompts[1])  # a fix attempt is told the review again
+
+    def test_rework_that_changes_nothing_is_no_change(self):
+        head = self.implemented()
+        _, step, _ = self.run_step(self.spec("rework", expected_head=head, feedback="x"), FakeClaude(lambda work: None))
+        self.assertEqual((step.output["outcome"], self.remote_head()), ("no-change", head))
+
     def test_cleanup_removes_only_the_plan(self):
         head = self.planned()
         claude = FakeClaude()
@@ -794,8 +812,8 @@ class SpecAndEndingTests(Base):
                 self.assertEqual(out.status, "failed")
                 self.assertEqual(claude.prompts, [])
 
-    def test_review_fix_and_cleanup_need_a_head(self):
-        for step in ("review", "fix", "cleanup"):
+    def test_rework_review_fix_and_cleanup_need_a_head(self):
+        for step in ("rework", "review", "fix", "cleanup"):
             with self.subTest(step=step), self.assertRaises(steps.SpecError):
                 steps.validate_spec(self.spec(step))
 

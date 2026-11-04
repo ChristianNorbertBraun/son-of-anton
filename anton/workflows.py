@@ -1,7 +1,8 @@
 """Built-in workflows. Plain data of the shape TOML workflows will have: a list of stages, run in order.
 
 A stage is a step job (plan, implement, review, cleanup), `pr` (open the draft PR), `ready` (mark it ready) or
-`gate:<name>` (wait for the owner). `fix` and `revise` are no stages: they are detours back into the list."""
+`gate:<name>` (wait for the owner). `fix`, `revise` and `rework` are no stages: they are detours back into the
+list."""
 from __future__ import annotations
 
 import re
@@ -23,7 +24,7 @@ FLOW_BRANCH_PREFIX = "anton/flow-"
 FLOW_BRANCH_RE = re.compile(r"anton/flow-[0-9a-f]{8}")  # the fence: only a flow pushes here. Older jobs had names like
 #                                                         anton/flow-chart-page-136ebb, and those stay theirs
 # labels only a flow sets. anton:running and anton:pr also belong to normal jobs, so they cannot mark one
-FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:blocked")
+FLOW_ONLY_LABELS = ("anton:awaiting-plan-review", "anton:approved", "anton:blocked")
 
 
 def is_flow_issue(labels) -> bool:

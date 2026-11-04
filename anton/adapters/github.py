@@ -2,7 +2,7 @@
 in the core. Labels and comments use the issues token; changes to a pull request a write token minted per call."""
 from __future__ import annotations
 
-from ..github import EVENT_PAGES, GitHub
+from ..github import EVENT_PAGES, PR_DRAFT, GitHub
 from ..poller import last_labeler
 from ..ports import AdapterError, Note, PrRef, PrState, Review, Task, has_marker, marked
 from ..workflows import LABEL_PREFIX, WORKFLOWS, flow_label
@@ -10,10 +10,19 @@ from ..workflows import LABEL_PREFIX, WORKFLOWS, flow_label
 STATE_PREFIX = "anton:"
 STATE_COLOR = "1d76db"
 FLOW_COLOR = "5319e7"
-FLOW_STATES = ("queued", "running", "awaiting-plan-review", "pr", "blocked", "done", "cancelled")
+FLOW_STATES = ("queued", "running", "awaiting-plan-review", "pr", "approved", "blocked", "done", "cancelled")
 REVIEW_STATES = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes_requested", "COMMENTED": "commented"}
 MARK_READY = ("mutation ($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
               "{ pullRequest { isDraft } } }")
+MARK_DRAFT = ("mutation ($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) "
+              "{ pullRequest { isDraft } } }")
+# itemTypes filters the nodes, not totalCount, so only the nodes count
+LAST_DRAFT_MARK = ("query ($o: String!, $n: String!, $pr: Int!) { repository(owner: $o, name: $n) "
+                   "{ pullRequest(number: $pr) { isDraft "
+                   "timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) "
+                   "{ nodes { __typename ... on ReadyForReviewEvent { actor { __typename login } } "
+                   "... on ConvertToDraftEvent { actor { __typename login } } } } } } }")
+DRAFT_MARKS = {"ReadyForReviewEvent": "ready", "ConvertToDraftEvent": "draft"}
 
 
 def not_found(error: Exception) -> bool:
@@ -135,13 +144,37 @@ class GitHubCodeHost:
 
     def pr_state(self, pr: PrRef) -> PrState:
         p = self._pull(pr.number)
-        reviews = tuple(Review(login(r), REVIEW_STATES[r["state"]], r.get("commit_id") or "", r.get("body") or "")
+        reviews = tuple(Review(login(r), REVIEW_STATES[r["state"]], r.get("commit_id") or "", r.get("body") or "",
+                               str(r.get("id") or ""))
                         for r in self.gh.reviews(pr.number) if login(r) and r.get("state") in REVIEW_STATES)
         # original_commit_id: the commit it was written on. commit_id moves along with the branch
         notes = tuple(Note(login(c), c.get("body") or "", c.get("original_commit_id") or c.get("commit_id"))
                       for c in self.gh.review_comments(pr.number) if login(c))
         return PrState(PrRef(p["number"], p.get("html_url") or ""), (p.get("head") or {}).get("sha") or "",
                        bool(p.get("draft")), p.get("state") or "open", bool(p.get("merged")), reviews, notes)
+
+    def is_draft(self, pr: PrRef) -> bool:
+        return bool(self._pull(pr.number).get("draft"))
+
+    def last_draft_mark(self, pr: PrRef) -> tuple[str, str] | None:
+        """GraphQL gives the newest one directly, where the REST event list would have to be paged to its end.
+        It names a bot without `[bot]`: the suffix goes back on here, or the App would look like a person."""
+        owner, name = self.gh.repo.slug.split("/", 1)
+        data = self.gh.read_graphql(LAST_DRAFT_MARK, {"o": owner, "n": name, "pr": int(pr.number)})
+        found = (data.get("repository") or {}).get("pullRequest")
+        if found is None:
+            raise AdapterError(f"no pull request {pr.number}")
+        nodes = (found.get("timelineItems") or {}).get("nodes") or []
+        if not nodes or nodes[-1].get("__typename") not in DRAFT_MARKS:
+            return None
+        kind = DRAFT_MARKS[nodes[-1]["__typename"]]
+        if kind == "ready" and found.get("isDraft"):  # whatever the marks say, a draft is no Ready
+            return "draft", ""
+        actor = nodes[-1].get("actor") or {}
+        who = actor.get("login") or ""
+        if who and actor.get("__typename") == "Bot" and not who.lower().endswith("[bot]"):
+            who += "[bot]"
+        return kind, who
 
     def comment(self, pr: PrRef, text: str, marker: str) -> None:
         if not written_by(self.gh.issue_comments(pr.number), self.bot, marker):
@@ -151,6 +184,13 @@ class GitHubCodeHost:
         p = self._pull(pr.number)
         if p.get("draft"):  # REST ignores `draft: false`, so this is the one way
             self.gh.graphql(MARK_READY, {"id": p["node_id"]})
+
+    def mark_draft(self, pr: PrRef) -> bool:
+        p = self._pull(pr.number)
+        if p.get("draft"):
+            return False
+        self.gh.graphql(MARK_DRAFT, {"id": p["node_id"]}, PR_DRAFT)
+        return True
 
     def close(self, pr: PrRef) -> None:
         self.gh.write("PATCH", f"/pulls/{int(pr.number)}", {"state": "closed"})

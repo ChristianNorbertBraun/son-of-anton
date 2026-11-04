@@ -19,7 +19,7 @@ class FakeGitHub:
     def api(self, method, path, token, body=None):
         self.calls.append((method, path, token))
         if path == "/graphql":
-            return self.graphql(body)
+            return self.graphql(body, token)
         url = urlsplit(path)
         route = url.path.removeprefix(f"/repos/{self.slug}")
         query = parse_qs(url.query)
@@ -122,13 +122,49 @@ class FakeGitHub:
     def review_comments(self, query, body, number):
         return self._page(self._pull(number)["_comments"], query)
 
-    def graphql(self, body):
+    def permissions_of(self, token):
+        return self.tokens[int(token.removeprefix("token-")) - 1]
+
+    def graphql(self, body, token):
         if self.fail_graphql:
             return {"data": None, "errors": [{"message": self.fail_graphql}]}
-        for pull in self.pulls.values():
+        if body["query"].startswith("query"):
+            return self.last_draft_mark(body["variables"], token)
+        draft = "convertPullRequestToDraft" in body["query"]
+        # what the real one does: converting needs contents write as well, marking ready does not
+        if draft and self.permissions_of(token).get("contents") != "write":
+            return {"data": None, "errors": [{"message": "Resource not accessible by integration"}]}
+        for number, pull in self.pulls.items():
             if pull["node_id"] == body["variables"]["id"]:
-                pull["draft"] = False
-        return {"data": {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": False}}}}
+                self.set_draft(number, draft, self.bot)
+        name = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
+        return {"data": {name: {"pullRequest": {"isDraft": draft}}}}
+
+    def last_draft_mark(self, variables, token):
+        """Like the real one: a bot's login without `[bot]`, a deleted account as no actor, no node without a mark."""
+        assert self.permissions_of(token).get("pull_requests") in ("read", "write")
+        assert f"{variables['o']}/{variables['n']}" == self.slug
+        if variables["pr"] not in self.pulls:
+            return {"data": {"repository": {"pullRequest": None}}}
+        names = {"ready_for_review": "ReadyForReviewEvent", "convert_to_draft": "ConvertToDraftEvent"}
+        marks = [e for e in self.issues[variables["pr"]].get("_events", []) if e["event"] in names]
+        nodes = []
+        if marks:
+            login = (marks[-1].get("actor") or {}).get("login")
+            actor = None if login is None else (
+                {"__typename": "Bot", "login": login.removesuffix("[bot]")} if login.endswith("[bot]")
+                else {"__typename": "User", "login": login})
+            nodes = [{"__typename": names[marks[-1]["event"]], "actor": actor}]
+        pull = self.pulls[variables["pr"]]
+        return {"data": {"repository": {"pullRequest": {"isDraft": pull["draft"], "timelineItems": {
+            "totalCount": len(self.issues[variables["pr"]].get("_events", [])), "nodes": nodes}}}}}
+
+    def set_draft(self, number, draft, actor):
+        pull = self.pulls[number]
+        if pull["draft"] != draft:
+            pull["draft"] = draft
+            self.issues[number].setdefault("_events", []).append(
+                {"event": "convert_to_draft" if draft else "ready_for_review", "actor": {"login": actor}})
 
     ROUTES = (
         (r"GET /issues", list_issues),
@@ -169,8 +205,15 @@ class FakeGitHub:
         return sha
 
     def add_review(self, pr, actor, state, commit, text=""):
-        self.pulls[pr.number]["_reviews"].append({"user": {"login": actor}, "state": state.upper(), "commit_id": commit,
-                                                  "body": text})
+        reviews = self.pulls[pr.number]["_reviews"]
+        reviews.append({"id": 1000 + len(reviews), "user": {"login": actor}, "state": state.upper(),
+                        "commit_id": commit, "body": text})
+
+    def mark_ready_by(self, pr, actor):
+        self.set_draft(pr.number, False, actor)
+
+    def mark_draft_by(self, pr, actor):
+        self.set_draft(pr.number, True, actor)
 
     def add_foreign_pull(self, branch, author="stranger", base="main", head_repo=None):
         number = self.next_number

@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.adapters.local import LocalCodeHost, LocalTracker
-from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker
+from anton.adapters.stdio import StdioClient, StdioCodeHost, StdioTracker, as_mark, as_pr_state
+from anton.ports import PrRef
 from anton.ports import AdapterError
 
 from .kit import Contract
@@ -34,7 +35,8 @@ class StdioConformance(Contract, Base, unittest.TestCase):
         return StdioTracker(client), StdioCodeHost(client), SimpleNamespace(
             add=tracker.owner_add, close=tracker.owner_close, push=pusher(self.bare), review=host.owner_review,
             note=host.owner_note, merge=host.owner_merge, comments=host.comments, task_comments=tracker.comments,
-            task_state=tracker.state_of, pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]))
+            task_state=tracker.state_of, pr_text=lambda pr: (host.details(pr)["title"], host.details(pr)["body"]),
+            ready=host.owner_ready, draft=host.owner_draft, bot=host.actor)
 
 
 class ClientTests(Base, unittest.TestCase):
@@ -72,6 +74,28 @@ class ClientTests(Base, unittest.TestCase):
         self.addCleanup(client.stop)
         with self.assertRaisesRegex(AdapterError, "does not match"):
             client.call("list_ready")
+
+    def test_a_draft_mark_that_is_no_pair_of_strings_is_an_error(self):
+        self.assertEqual(as_mark(["ready", "alice"]), ("ready", "alice"))
+        self.assertIsNone(as_mark(None))
+        for bad in (["ready"], ["ready", "alice", "x"], ["ready", None], "ready", 5, {}):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                as_mark(bad)
+
+    def test_a_review_without_a_usable_id_is_an_error(self):
+        data = {"ref": {"number": 1}, "head": "a" * 40, "draft": False, "state": "open", "merged": False}
+        review = {"actor": "alice", "state": "approved", "commit": "a" * 40, "text": ""}
+        self.assertEqual(as_pr_state({**data, "reviews": [{**review, "id": "7"}]}).reviews[0].id, "7")
+        for bad in ({}, {"id": ""}, {"id": 7}, {"id": None}, {"id": "a:b"}):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                as_pr_state({**data, "reviews": [{**review, **bad}]})
+
+    def test_is_draft_takes_only_a_boolean(self):
+        for answer, expected in ((True, True), (False, False)):
+            self.assertIs(StdioCodeHost(SimpleNamespace(call=lambda *a, x=answer, **k: x)).is_draft(PrRef(1)), expected)
+        for bad in ("false", "true", 0, 1, None, []):
+            with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                StdioCodeHost(SimpleNamespace(call=lambda *a, x=bad, **k: x)).is_draft(PrRef(1))
 
     def test_a_flood_is_cut_off(self):
         client = StdioClient([sys.executable, "-c",

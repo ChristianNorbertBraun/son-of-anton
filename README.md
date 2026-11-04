@@ -71,14 +71,18 @@ A flow takes an issue from label to merge in several steps, with a gate wherever
 
 | Label | Steps |
 |---|---|
-| `flow:quick` | implement, draft PR, review, fix if needed, ready, you merge |
-| `flow:standard` | plan, draft PR, you approve the plan, implement, review, fix if needed, remove the plan, ready, you merge |
+| `flow:quick` | implement, draft PR, review, fix if needed, ready, you review and merge |
+| `flow:standard` | plan, draft PR, you mark it ready, implement, review, fix if needed, remove the plan, ready, you review and merge |
 
 - A flow starts only if the issue's author is allowed (or the App, for issues from chat) and an allowed person set the label. The label goes away at the start; set it again for a new flow.
-- The plan gate is a review on the draft PR, for the commit it was written on: "Approve" goes on, "Request changes" revises the plan on the same PR, up to 3 times. Reviews from anyone else, bots, the App or chat agents do nothing.
+- The gates are the buttons on the pull request. Only clicks and reviews by `allowed_authors` count, never by bots, the App or chat agents, and a review counts only for the commit it was written on.
+  - **Plan gate**: the PR is a draft with only `.rook/PLAN.md`. "Request changes" revises the plan on the same PR, up to 3 times. **"Ready for review"** is the go: Anton implements, reviews and fixes its work, removes the plan and updates the PR text. Each new version of the plan turns the PR back into a draft; a Ready clicked before that version was up gets a comment and has to be clicked again. "Approve" starts nothing here, it gets a comment that says to click Ready.
+  - **Merge gate**: the PR is ready. "Request changes" starts another round (`rework`): your review and line comments go to Claude as data, the change passes the checks, Anton reviews it again, and the PR comes back to the gate; after 3 rounds the flow is `blocked`. "Approve" sets `anton:approved` and nothing else: a later "Request changes" still starts a round. Merging is yours, and ends the flow as `done`.
+  - A review on an older commit changes nothing and gets one comment saying so.
+  - Known limit: review text is read when the gate is looked at, so anyone with write access to the repo could edit an owner's review before Anton reads it. Flows are meant for repos where only the owner has write access.
 - Each code change passes the repo's checks before it is pushed, with up to 3 attempts to fix a failure. A flow never force-pushes, and the branch `anton/flow-<id>` is off limits for every other job.
 - Steps load the repo's `CLAUDE.md`. Everything else a checkout could use to configure Claude is hidden, and a step cannot change a `CLAUDE.md`.
-- `blocked` means the owner has to look. The reason is on the issue. `anton flow show <id>` has the details, `anton flow retry <id>` runs the step again, and `anton flow cancel <id>` ends the flow. A retry takes over a push to the branch only if that push is what blocked the flow; if the plan could have changed with it, the plan needs approval again.
+- `blocked` means the owner has to look. The reason is on the issue. `anton flow show <id>` has the details, `anton flow retry <id>` runs the step again (except a rework: it goes back to the merge gate, and your next "Request changes" starts the next round), and `anton flow cancel <id>` ends the flow. A retry takes over a push to the branch only if that push is what blocked the flow; if the plan could have changed with it, the PR is a draft again and needs Ready again.
 - `anton dashboard` is a read-only page of all flows and their steps, on 127.0.0.1 (see `examples/anton-dashboard.service`). Reach it through a tunnel, `ssh -L 8766:127.0.0.1:8766 <host>`, at `http://127.0.0.1:8766/<token>`. The token is in `dashboard-token` in the config directory, made on first start, because loopback does not keep out other users of the machine.
 - Trackers other than GitHub come as adapters: built in, or as a separate program that speaks JSON lines over stdin and stdout (`anton/adapters/stdio.py` has the protocol, `tests/conformance/` the suite every adapter must pass). An adapter runs outside the sandbox with its tracker's token, so it is trusted code; nothing installs one by itself. The config cannot name one yet.
 - Each line of an optional `private-strings` file in the config directory is refused in anything a flow writes to GitHub. Normal jobs do not read it. `private_check = false` turns it off for a repo.
@@ -87,7 +91,7 @@ A flow takes an issue from label to merge in several steps, with a gate wherever
 
 1. Dedicated unprivileged user; `python3` (3.11+), `git`, `openssl`, `bubblewrap`, Node for your projects.
 2. Claude Code for that user and a token from `claude setup-token`.
-3. A GitHub App (webhook off; Contents, Issues, Pull requests = write; no Workflows), installed only on allowed repos. Key in `~/.config/son-of-anton/app-key.pem` (mode 600).
+3. A GitHub App (webhook off; Contents, Issues, Pull requests = write; no Workflows), installed only on allowed repos. Key in `~/.config/son-of-anton/app-key.pem` (mode 600). Each token is scoped to one repo and the permissions of its call: changes to a pull request get pull requests write only, except turning one back into a draft, which GitHub allows only with contents write as well.
 4. `examples/repos.toml` → `~/.config/son-of-anton/repos.toml`, fill in your values. Only `github.com` is accepted. Per repo: `checks` (`gate` must pass, `regression` must not get worse; `metric` or `metric_lines` count the problems), `protected_paths`, `allow_tools` / `deny_tools` (a mandatory deny floor can only be extended), `allowed_authors` and `trigger_label` for the issue trigger, and the `[daemon]` limits.
 
 ## Updating
@@ -98,6 +102,8 @@ Son of Anton updates itself from its own releases with [agent-tool-selfupdate](h
 2. Both archives are unpacked next to the old version (`~/releases/<version>+u<library>`, plain files only). The library's and Anton's tests run in the sandbox, the new updater must still find the releases (probe), and the new code must read your real config (`anton config-check`).
 3. Running jobs finish first (no new job starts meanwhile, queued ones wait). Then `~/current` points to the new version in one step, the service restarts and must report the new version and stay up for 15 seconds.
 4. If that fails the symlink goes back and the old version is started again. A Telegram message says what happened, and `anton_update_check` shows the last result. Three versions are kept.
+
+Once 0.12 has run, `flows.db` holds fields 0.11.1 cannot read: a rollback to 0.11.1 stops the conductor until 0.12 or newer is installed again. Jobs from the chat are not affected, and nothing is lost.
 
 `~/bin/anton` and the service run `~/current`. Merging a PR never changes the running installation; only a release you publish and an update you ask for do. Add `[update]` to the config to turn it on (see `examples/repos.toml`). An installation from before 0.3.0 gets the library once by hand: see "First installation" in the library's README.
 

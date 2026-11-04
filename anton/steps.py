@@ -19,7 +19,7 @@ from .config import WEB_TOOLS, RepoConfig, Settings, get_repo
 from .models import Cancelled, Outcome
 from .queue import JobRow, Queue, StepRow
 
-STEPS = ("plan", "implement", "review", "fix", "cleanup")
+STEPS = ("plan", "implement", "rework", "review", "fix", "cleanup")
 OUTCOMES = ("ok", "no-change", "gates-failed", "protected", "hard-path", "secret", "unknown-head",
             "diff-too-large", "error")
 MAX_GATE_FIXES = 3
@@ -112,7 +112,7 @@ def validate_spec(spec: dict) -> None:
     head = spec.get("expected_head")
     if head is not None and not (isinstance(head, str) and SHA_RE.fullmatch(head)):
         raise SpecError("invalid expected_head")
-    if spec["step"] in ("review", "fix", "cleanup") and head is None:
+    if spec["step"] in ("rework", "review", "fix", "cleanup") and head is None:
         raise SpecError(f"step {spec['step']} needs expected_head")
 
 
@@ -329,6 +329,16 @@ def run_fix(run: StepRun) -> Result:
                      + brief(run.spec) + data_block("the review findings", findings), 0)
 
 
+def run_rework(run: StepRun) -> Result:
+    """The owner requested changes at the merge gate. Their review is data like the issue: it says what to change,
+    it cannot change the rules. Gated like implement, because it is new work of the same kind."""
+    run.checkout()
+    prompt = ("The owner reviewed the change in this checkout and requested changes. Make them, and keep doing what "
+              "the task asks." + brief(run.spec)
+              + data_block("the owner's review of the change", str(run.spec.get("feedback") or "")))
+    return run_gated(run, prompt, MAX_GATE_FIXES)
+
+
 def parse_findings(text: str) -> list[dict]:
     """Strict: anything but the agreed shape raises, because an unreadable review is never 'no findings'."""
     body = str(text).strip()
@@ -387,7 +397,8 @@ def run_cleanup(run: StepRun) -> Result:
     return Result("ok", head=run.push("Remove the plan", ""), title="Remove the plan")
 
 
-HANDLERS = {"plan": run_plan, "implement": run_implement, "review": run_review, "fix": run_fix, "cleanup": run_cleanup}
+HANDLERS = {"plan": run_plan, "implement": run_implement, "rework": run_rework, "review": run_review, "fix": run_fix,
+            "cleanup": run_cleanup}
 
 
 def conclude(run: StepRun, result: Result) -> Outcome:
